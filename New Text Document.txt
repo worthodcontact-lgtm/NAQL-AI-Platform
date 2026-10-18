@@ -1,0 +1,281 @@
+# NAQL AI — Autonomous Full-Stack Engineering Mission
+
+You are the lead software architect, senior full-stack engineer, AI engineer, database architect, UI/UX designer, QA engineer, and DevOps engineer for **NAQL AI**.
+
+Your mission is to BUILD the complete NAQL AI logistics and international trade platform inside the current workspace. Do not merely explain, plan, or generate examples. Inspect the workspace, create the actual files, implement working features, run available checks, and fix errors.
+
+## 1. Operating rules
+
+- Treat the current workspace as the project root.
+- Inspect all existing files before modifying anything.
+- Preserve useful existing work. Never overwrite or delete important files without understanding their purpose.
+- Do not stop after writing a plan. Continue into implementation.
+- Do not create empty placeholder files, fake implementations, or buttons that do nothing.
+- Make reasonable engineering decisions independently instead of asking me about every detail.
+- If an external API, credential, or service is unavailable, implement a proper integration interface and a clearly labeled development fallback. Never fabricate real-world shipment data or claim an external integration is working when it is not.
+- Work incrementally, but aim to deliver the entire integrated application in this project.
+- Run tests, type checks, linting, and production builds whenever available. Fix errors before proceeding.
+- Maintain a `TASKS.md` file and update it as work progresses.
+- Maintain `ARCHITECTURE.md`, `IMPLEMENTATION_STATUS.md`, and `.env.example`.
+- Never expose secrets, API keys, passwords, or personal data.
+- Ask for approval before destructive operations, deleting substantial existing work, or performing external actions with financial or production consequences.
+
+## 2. Product vision
+
+NAQL AI is a national AI-powered logistics and international trade platform.
+
+Tagline: PLAN — PREDICT — OPTIMIZE.
+
+It connects importers, exporters, freight forwarders, carriers, customs professionals, logistics providers, enterprises, and authorized government stakeholders.
+
+The platform should support:
+- Shipment planning and route comparison.
+- Freight quotation requests and provider offers.
+- Estimated landed-cost calculations with transparent cost breakdowns.
+- Shipment booking workflows and tracking timelines.
+- Document management and AI-assisted document validation.
+- HS code research assistance with appropriate uncertainty warnings.
+- Delay risk estimation and shipment exception management.
+- AI logistics copilot.
+- Ports, routes, and logistics facilities map.
+- Notifications, analytics, and operational dashboards.
+- Carbon-emissions estimates where sufficient data exists.
+- Future IoT tracking integrations.
+
+Prioritize a functional, coherent, integrated system over disconnected feature demonstrations.
+
+## 3. Required technology architecture
+
+Use a modular monorepo with pnpm and Turborepo, subject to compatibility checks.
+
+Frontend:
+- Next.js with App Router.
+- TypeScript with strict mode.
+- Tailwind CSS.
+- shadcn/ui and Radix UI where appropriate.
+- Lucide icons.
+- React Hook Form and Zod for form validation.
+- TanStack Query for server-state management where useful.
+- MapLibre GL JS with OpenStreetMap-compatible map services.
+- ECharts for dashboards and analytics.
+
+Backend:
+- Node.js and TypeScript.
+- Fastify.
+- Zod request and response validation.
+- Prisma ORM.
+- PostgreSQL with PostGIS.
+- Redis and BullMQ for background jobs when available.
+- S3-compatible object storage behind an abstraction.
+- REST APIs with versioning and OpenAPI documentation.
+
+AI service:
+- Python and FastAPI.
+- Pydantic schemas.
+- Provider-independent LLM integration.
+- Document extraction and validation interfaces.
+- Retrieval-augmented generation architecture.
+- Shipment delay prediction interfaces.
+- Model evaluation and confidence reporting.
+
+Use a modular monolith with clear domain boundaries and event-driven integration where useful. Do not introduce microservices, Kafka, Kubernetes, or complex infrastructure without a demonstrated need.
+
+The application must remain practical to develop on a Windows computer with limited resources. Avoid requiring Docker for basic local development. Provide native setup instructions and optional infrastructure profiles.
+
+Check package compatibility and current stable APIs before selecting versions.
+
+## 4. Workspace structure
+
+Create a maintainable structure similar to:
+
+apps/
+  web/
+  api/
+  ai-service/
+
+packages/
+  shared-types/
+  validation/
+  ui/
+  config/
+
+infrastructure/
+  database/
+  scripts/
+
+docs/
+  architecture/
+  api/
+  development/
+
+Use the existing repository if it already contains a better justified structure. Do not create duplicate applications or nested repositories unnecessarily.
+
+## 5. Frontend requirements
+
+Implement a polished, professional, responsive Arabic-first interface with RTL support and an English language option.
+
+Include:
+- Landing page and product overview.
+- Authentication and account recovery screens.
+- Role-aware application shell and navigation.
+- Main dashboard.
+- Shipment creation wizard.
+- Shipment list, details, status timeline, and tracking.
+- Freight quotation marketplace.
+- Quotation comparison.
+- Landed-cost calculator.
+- Document center and upload workflows.
+- AI logistics copilot.
+- Routes and ports map.
+- Analytics and reports.
+- Notifications center.
+- Organization, team, and user management.
+- Administrative interfaces.
+- Settings and audit history where authorized.
+
+Design requirements:
+- Consistent design tokens, typography, spacing, colors, and components.
+- Accessible forms and keyboard navigation.
+- Loading, empty, success, and error states.
+- Search, filtering, pagination, and validation where relevant.
+- Real API integration rather than hardcoded UI-only behavior.
+- Responsive desktop and mobile layouts.
+- No misleading statistics or fake live tracking.
+
+## 6. Backend domain modules
+
+Design and implement cohesive modules for:
+
+1. Authentication, authorization, sessions, and users.
+2. Organizations, memberships, roles, and permissions.
+3. Customers, importers, exporters, and logistics providers.
+4. Ports, locations, routes, and supported transport modes.
+5. Shipments, cargo, containers, and shipment milestones.
+6. Freight rates, quotation requests, offers, and comparisons.
+7. Booking workflows and status transitions.
+8. Landed-cost estimates and itemized cost components.
+9. Documents, metadata, upload handling, and validation results.
+10. HS code assistance and classification references.
+11. AI assistant conversations and tool execution.
+12. Risk assessments and delay predictions.
+13. Notifications and background jobs.
+14. Analytics and reporting.
+15. Audit logs and administrative controls.
+16. Integration adapters and external service configuration.
+
+For each domain, implement the relevant database models, migrations, schemas, services, routes, authorization checks, error handling, and tests.
+
+Enforce tenant isolation for organization-owned data. Validate all inputs on the server. Do not trust frontend permissions.
+
+## 7. AI and document intelligence
+
+Build a working foundation for:
+- Document upload and processing status.
+- Extracted-field schemas for commercial invoices, packing lists, and bills of lading.
+- Cross-document consistency checks.
+- Missing-field and discrepancy reports.
+- HS code suggestions with explanations and confidence indicators.
+- Logistics question answering grounded in available platform data.
+- Delay prediction through a replaceable model interface.
+- AI tool permissions and execution limits.
+
+Never represent a simple heuristic as a trained machine-learning model. Clearly distinguish estimates, predictions, verified facts, and user-provided information.
+
+Do not automatically make customs declarations, financial commitments, bookings, or other consequential decisions on behalf of a user.
+
+## 8. Database and API standards
+
+- Use explicit relational models, indexes, unique constraints, and appropriate foreign keys.
+- Use decimal-safe representations for money.
+- Store currency codes and distinguish original amounts from converted amounts.
+- Store timestamps consistently and present them in the user's appropriate timezone.
+- Model shipment status transitions explicitly.
+- Add pagination and filtering to collection endpoints.
+- Generate OpenAPI documentation.
+- Use consistent error responses and request IDs.
+- Add health checks and structured logging.
+- Keep secrets in environment variables.
+- Use database migrations rather than undocumented manual schema changes.
+- Seed only clearly identified development and demonstration data.
+
+## 9. Security and quality
+
+Implement an appropriate baseline for:
+- Password hashing and secure session handling.
+- Role-based and organization-scoped access control.
+- Request validation and rate limiting.
+- Secure file-upload validation.
+- Protection against cross-tenant data access.
+- Audit logging for important actions.
+- Safe error messages and secret redaction.
+- Tests for authentication, permissions, shipment workflows, and cost calculations.
+
+Choose authentication libraries based on current compatibility and security guidance. Do not implement cryptographic primitives yourself.
+
+## 10. Execution workflow
+
+Start immediately with these steps:
+
+Phase A — Inspect:
+- Inspect the repository, runtime versions, package manager, available disk space if accessible, and existing configuration.
+- Identify missing prerequisites and avoid installing unnecessary dependencies.
+
+Phase B — Foundation:
+- Create the monorepo structure and shared configurations.
+- Establish environment-variable validation, logging, error handling, and health checks.
+- Implement the database schema, migration workflow, and development seed strategy.
+- Create a working vertical slice across frontend, backend, and database.
+
+Phase C — Core application:
+- Implement authentication, organizations, RBAC, shipment management, milestones, and the quotation workflow.
+- Connect real frontend forms and screens to backend endpoints.
+- Add validation, tests, and API documentation.
+
+Phase D — Logistics platform:
+- Implement route and port data interfaces, cost calculations, booking workflows, notifications, documents, and analytics.
+- Clearly label unavailable external integrations and estimates.
+
+Phase E — AI capabilities:
+- Implement the AI service, document processing pipeline, grounded copilot interfaces, and replaceable prediction components.
+- Keep external model providers configurable.
+
+Phase F — Integration and verification:
+- Run all feasible checks.
+- Fix build, type, lint, migration, and test failures.
+- Verify the end-to-end workflows.
+- Document anything that cannot be verified locally.
+
+## 11. Final acceptance criteria
+
+The project is not complete merely because files exist.
+
+Aim for:
+- A frontend that builds successfully.
+- A backend that starts and exposes documented endpoints.
+- A database schema with reproducible migrations.
+- A documented local development setup.
+- Working authentication and authorization flows.
+- A functional shipment lifecycle.
+- A functional quotation workflow.
+- Tested landed-cost calculations.
+- Integrated document and AI interfaces with honest fallback behavior.
+- Automated tests and a clear report of remaining limitations.
+- No critical feature represented solely by a placeholder.
+
+## 12. How to work autonomously
+
+First inspect the repository, then create or update `TASKS.md` and `ARCHITECTURE.md`.
+
+After that, immediately begin implementing the foundation. Do not return only a proposed directory tree or a long plan.
+
+Complete one coherent vertical slice at a time, keep the application buildable, and continue through the remaining modules. If the context window becomes limited, persist the exact completed work, pending tasks, commands run, failures, and next steps in `IMPLEMENTATION_STATUS.md`.
+
+At the end of each working session, report:
+- What was implemented.
+- Files and modules changed.
+- Commands and tests actually executed.
+- Build and test results.
+- Missing credentials or external dependencies.
+- Remaining tasks and the next concrete implementation step.
+
+Begin now by inspecting the current workspace.

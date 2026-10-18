@@ -1,0 +1,267 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id          String       @id @default(cuid())
+  name        String
+  slug        String       @unique
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  users       User[]
+  memberships Membership[]
+  shipments   Shipment[]
+  quotationRequests QuotationRequest[]
+}
+
+model User {
+  id             String       @id @default(cuid())
+  email          String       @unique
+  passwordHash   String
+  displayName    String
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  memberships    Membership[]
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+model Membership {
+  id             String       @id @default(cuid())
+  organizationId String
+  userId         String
+  role           String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, userId])
+}
+
+model Port {
+  id        String     @id @default(cuid())
+  code      String     @unique
+  name      String
+  country   String
+  latitude  Float
+  longitude Float
+  shipmentsFrom Shipment[] @relation("OriginPort")
+  shipmentsTo   Shipment[] @relation("DestinationPort")
+}
+
+model Shipment {
+  id                String             @id @default(cuid())
+  reference         String             @unique
+  organizationId    String
+  organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdByUserId   String
+  originPortId      String
+  destinationPortId String
+  originPort        Port               @relation("OriginPort", fields: [originPortId], references: [id])
+  destinationPort   Port               @relation("DestinationPort", fields: [destinationPortId], references: [id])
+  mode              String
+  incoterm          String
+  status            String             @default("DRAFT")
+  cargoDescription  String
+  weightKg          Decimal
+  volumeCbm         Decimal?
+  milestones        ShipmentMilestone[]
+  quotationRequests QuotationRequest[]
+  documents         Document[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+}
+
+model ShipmentMilestone {
+  id         String   @id @default(cuid())
+  shipmentId String
+  shipment   Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  code       String
+  label      String
+  status     String   @default("pending")
+  occurredAt DateTime?
+}
+
+model QuotationRequest {
+  id             String         @id @default(cuid())
+  shipmentId     String
+  shipment       Shipment       @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  status         String         @default("open")
+  requestedAt    DateTime       @default(now())
+  offers         QuotationOffer[]
+}
+
+model QuotationOffer {
+  id                  String           @id @default(cuid())
+  quotationRequestId  String
+  quotationRequest    QuotationRequest @relation(fields: [quotationRequestId], references: [id], onDelete: Cascade)
+  providerId          String
+  currency            String
+  amount              Decimal
+  transitDays         Int
+  validityUntil       DateTime
+}
+
+model Document {
+  id          String   @id @default(cuid())
+  shipmentId  String
+  shipment    Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  type        String
+  filename    String
+  storageKey  String
+  status      String   @default("uploaded")
+  validation  String?
+  uploadedAt  DateTime @default(now())
+}
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String?
+  actorUserId    String?
+  action         String
+  entityType     String
+  entityId       String?
+  metadata       String?
+  createdAt      DateTime @default(now())
+}
+
+model Company {
+  id                 String              @id @default(cuid())
+  name               String
+  slug               String              @unique
+  type               String
+  status             String              @default("draft")
+  verificationStatus String              @default("unregistered")
+  listed             Boolean             @default(false)
+  description        String?
+  country            String?
+  website            String?
+  email              String?
+  phone              String?
+  organizationId     String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  services           CompanyService[]
+  documents          CompanyDocument[]
+  reviews            VerificationReview[]
+  rfqRecipients      RfqRecipient[]
+  quotes             Quote[]
+}
+
+model CompanyService {
+  id                 String   @id @default(cuid())
+  companyId          String
+  company            Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  mode               String
+  originLocation     String?
+  destinationLocation String?
+  notes              String?
+  createdAt          DateTime @default(now())
+}
+
+model CompanyDocument {
+  id         String   @id @default(cuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  type       String
+  filename   String
+  storageKey String
+  status     String   @default("uploaded")
+  reviewNote String?
+  uploadedAt DateTime @default(now())
+}
+
+model VerificationReview {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  reviewerUserId String
+  decision       String
+  notes          String?
+  createdAt      DateTime @default(now())
+}
+
+model Rfq {
+  id                String         @id @default(cuid())
+  organizationId    String
+  createdByUserId   String
+  origin            String
+  destination       String
+  mode              String
+  cargoDescription  String
+  weightKg          Decimal
+  status            String         @default("submitted")
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  recipients        RfqRecipient[]
+  quotes            Quote[]
+}
+
+model RfqRecipient {
+  id        String   @id @default(cuid())
+  rfqId     String
+  rfq       Rfq      @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  status    String   @default("invited")
+  invitedAt DateTime @default(now())
+
+  @@unique([rfqId, companyId])
+}
+
+model Quote {
+  id             String     @id @default(cuid())
+  rfqId          String
+  rfq            Rfq        @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  companyId      String
+  company        Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  organizationId String
+  currency       String
+  totalAmount    Decimal
+  transitDays    Int
+  validityUntil  DateTime
+  status         String     @default("submitted")
+  createdAt      DateTime   @default(now())
+  items          QuoteItem[]
+}
+
+model QuoteItem {
+  id       String  @id @default(cuid())
+  quoteId  String
+  quote    Quote   @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  label    String
+  amount   Decimal
+  currency String
+  included Boolean @default(true)
+}
+
+model BookingRequest {
+  id                String          @id @default(cuid())
+  rfqId             String?
+  quoteId           String?
+  organizationId    String
+  createdByUserId   String
+  status            String          @default("requested")
+  confirmedAt       DateTime?
+  externalReference String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  trackingEvents    TrackingEvent[]
+}
+
+model TrackingEvent {
+  id               String         @id @default(cuid())
+  bookingRequestId String
+  bookingRequest   BookingRequest @relation(fields: [bookingRequestId], references: [id], onDelete: Cascade)
+  code             String
+  label            String
+  source           String         @default("manual")
+  occurredAt       DateTime       @default(now())
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@naql/config",
+  "version": "0.1.0",
+  "private": true,
+  "files": ["tsconfig.base.json"],
+  "main": "index.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.base.json"
+  }
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.next/
+.next-verify/
+.env
+*.log
+__pycache__/
+.venv/
+pnpm-debug.log*
+.turbo/

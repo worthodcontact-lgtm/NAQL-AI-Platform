@@ -1,0 +1,24 @@
+{
+  "name": "naql-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NAQL AI logistics and international trade platform",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "db:generate": "pnpm --filter @naql/api run prisma:generate",
+    "db:migrate": "pnpm --filter @naql/api run prisma:migrate",
+    "db:seed": "pnpm --filter @naql/api run prisma:seed"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.0"
+}
