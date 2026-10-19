@@ -119,7 +119,15 @@ They never fabricate an answer.
 
 ## Environment variables
 
-Copy `.env.example` to `.env` and adjust. Only `NEXT_PUBLIC_*` variables reach the browser.
+Copy `.env.example` to `.env` in the repository root and adjust it. The API loads the
+repository-root `.env` and `apps/api/.env` at start-up using Node's built-in loader, so you
+do **not** need to set variables in every PowerShell session. Real environment variables
+still win over the file.
+
+Turbo only forwards the variables listed in `turbo.json` → `globalEnv`. Add any new
+variable there, or it will not reach the app processes.
+
+Only `NEXT_PUBLIC_*` variables reach the browser.
 
 ## Useful commands
 

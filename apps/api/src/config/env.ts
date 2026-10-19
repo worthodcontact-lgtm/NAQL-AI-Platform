@@ -1,4 +1,38 @@
 import { z } from "zod";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * Load .env before configuration is parsed.
+ *
+ * Uses Node's built-in loader (>= 20.12) so no dependency is required. The repo-root
+ * `.env` is git-ignored. Real environment variables always win: they are captured first
+ * and restored afterwards, so an explicit `$env:DATABASE_URL=...` is never overridden.
+ */
+function loadEnvFiles(files: string[]) {
+  const loader = (process as any).loadEnvFile;
+  if (typeof loader !== "function") return;
+
+  const realEnvironment = { ...process.env };
+  for (const file of files) {
+    if (!fs.existsSync(file)) continue;
+    try {
+      loader.call(process, file);
+    } catch {
+      // A malformed .env must not crash start-up; the schema check reports missing values.
+    }
+  }
+  for (const [key, value] of Object.entries(realEnvironment)) {
+    if (value !== undefined) process.env[key] = value;
+  }
+}
+
+const configDir = path.dirname(fileURLToPath(import.meta.url));
+loadEnvFiles([
+  path.resolve(configDir, "../../../../.env"), // repository root
+  path.resolve(configDir, "../../.env") // apps/api/.env
+]);
 
 const envSchema = z.object({
   NODE_ENV: z.string().default("development"),

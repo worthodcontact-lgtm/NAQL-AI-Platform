@@ -1,5 +1,17 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalEnv": [
+    "NODE_ENV",
+    "DATABASE_URL",
+    "JWT_SECRET",
+    "CORS_ORIGINS",
+    "LOG_LEVEL",
+    "STORAGE_PATH",
+    "AI_SERVICE_URL",
+    "AI_REQUEST_TIMEOUT_MS",
+    "NEXT_PUBLIC_API_URL",
+    "NEXT_DIST_DIR"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
