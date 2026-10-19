@@ -12,7 +12,7 @@
     "lint": "eslint src --ext .ts",
     "test": "pnpm run prisma:generate && vitest run",
     "prisma:generate": "prisma generate --schema prisma/schema.prisma",
-    "prisma:migrate": "prisma migrate dev --name init",
+    "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:seed": "tsx prisma/seed.ts",
     "admin": "tsx scripts/admin-cli.ts",

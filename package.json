@@ -11,6 +11,8 @@
     "test": "turbo run test",
     "db:generate": "pnpm --filter @naql/api run prisma:generate",
     "db:migrate": "pnpm --filter @naql/api run prisma:migrate",
+    "db:deploy": "pnpm --filter @naql/api run prisma:deploy",
+    "db:status": "pnpm --filter @naql/api run db:status",
     "db:seed": "pnpm --filter @naql/api run prisma:seed"
   },
   "devDependencies": {
