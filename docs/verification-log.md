@@ -252,3 +252,56 @@ PASS  ai-service reachable            service=naql-ai-service
   origins) and **no provider key**.
 - No secret was printed in any command, log, document, or report.
 
+
+## 9. `apikey.txt` re-audit — key identified (2026-10-19 03:43)
+
+The file was empty during section 8. It was then populated by the user. Re-audited with
+a script that prints only lengths, character-class shape masks, and matches against a
+candidate word list. **No key value was printed.**
+
+### 9.1 Structure
+
+| Line | Length | Shape | Meaning |
+|---|---|---|---|
+| 1 | 19 | `aaaaaaaaaaaa.aa.aaa` | host: `comtradeplus.un.org` |
+| 2 | — | blank | |
+| 3 | 7 | `Aaaaaaa` | literal `Primary` |
+| 4 | 32 | 32 lowercase hex | primary subscription key |
+| 5 | 9 | `Aaaaaaaaa` | literal `Secondary` |
+| 6 | 32 | 32 lowercase hex | secondary subscription key |
+
+Different values, both 32-character hex. Two interchangeable keys under
+`Primary`/`Secondary` is the Azure API Management subscription-key pattern.
+
+### 9.2 Identification
+
+**UN Comtrade** — the United Nations international trade statistics database.
+`comtradeplus.un.org` is the web platform; the API host is `comtradeapi.un.org`.
+
+This is a **trade-data subscription key, not an AI/LLM provider key**. It has no
+relationship to `AI_PROVIDER`, `OPENAI_API_KEY`, or `apps/ai-service`.
+
+### 9.3 Live verification
+
+```text
+GET https://comtradeapi.un.org/data/v1/get/C/A/HS
+    ?reporterCode=818&period=2023&partnerCode=0&cmdCode=TOTAL&flowCode=M
+anonymous : HTTP 401 (expected rejection)
+primary   : HTTP 200, rows=1
+secondary : HTTP 200, rows=1
+```
+
+Both keys are valid and active. The response contained the standard Comtrade fields
+(`typeCode`, `freqCode`, `refPeriodId`, `refYear`, `refMonth`, `period`).
+
+### 9.4 Configuration
+
+- Root `.env` (git-ignored) gained `COMTRADE_API_BASE_URL`, `COMTRADE_API_KEY`,
+  `COMTRADE_API_KEY_SECONDARY`. Values were copied by script; none was printed.
+- `.env.example` documents the three names with empty values.
+- `turbo.json` → `globalEnv` forwards them to the app processes.
+- `apikey.txt` itself was left untouched, still present, still git-ignored.
+
+**Important:** no application code reads these variables yet. They are inert until the
+trade-data integration is implemented. AI endpoints remain unconfigured and still return
+`providerAvailable: false`.
