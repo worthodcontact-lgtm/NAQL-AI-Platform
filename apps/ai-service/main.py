@@ -40,12 +40,14 @@ class CopilotRequest(BaseModel):
 
 @app.post("/copilot/answer")
 def copilot_answer(payload: CopilotRequest):
-    # Grounded placeholder: honest fallback, no external model call.
+    # No model provider is configured. A fabricated answer would be worse than an
+    # explicit, machine-readable unavailability signal.
     return {
         "answer": "AI provider not configured. This is a development fallback. Configure AI_PROVIDER/AI_API_KEY to enable model-backed answers.",
         "confidence": 0.0,
         "sources": [],
-        "disclaimer": "Estimate/fallback, not a verified fact."
+        "providerAvailable": False,
+        "disclaimer": "Fallback, not a verified fact."
     }
 
 @app.post("/documents/validate")
@@ -53,6 +55,7 @@ async def validate_document(file: UploadFile = File(...)):
     return {
         "filename": file.filename,
         "status": "uploaded",
+        "providerAvailable": False,
         "extractedFields": {},
         "issues": ["Document extraction provider not configured; heuristic extraction unavailable."],
         "disclaimer": "Development fallback."
@@ -71,5 +74,6 @@ def predict_delay(payload: DelayPredictionInput):
         "estimatedDelayDays": 0,
         "riskLevel": "unknown",
         "method": "placeholder-interface",
+        "providerAvailable": False,
         "disclaimer": "No trained model configured."
     }

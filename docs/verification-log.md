@@ -169,3 +169,86 @@ These would not have been visible in the in-memory fallback:
 - Password reset, email verification, MFA: not implemented.
 - Browser-level E2E (Playwright/Cypress): not installed.
 - Load, performance, and accessibility measurements: not collected.
+
+## 8. API-key audit and runtime re-verification (second session)
+
+### 8.1 `apikey.txt`
+
+Audited by a script that reported only metadata (size, line count, SHA-256, variable
+name, value length, and a provider classification derived from public key prefixes).
+No secret value was printed.
+
+Result:
+
+- `apikey.txt` exists at the repository root and is **0 bytes / empty**. No variable
+  name, token, or JSON object is present.
+- SHA-256 is `E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855`,
+  which is the digest of the empty string.
+- The file was never committed (`git log --all -- apikey.txt` returns nothing), so
+  there is no historical key to recover.
+- **No provider can be identified**, because there is no key.
+
+### 8.2 Existing provider integration
+
+- `grep -r "AI_PROVIDER|OPENAI|ANTHROPIC|OLLAMA|AI_API_KEY|AI_BASE_URL|AI_MODEL"`
+  over `apps/` matches exactly one string: the fallback message inside
+  `apps/ai-service/main.py`. **No code reads a provider key.**
+- `apps/api/src/ai/client.ts` only calls `AI_SERVICE_URL`. `apps/ai-service` is a
+  deterministic FastAPI placeholder using `fastapi`, `uvicorn`, `pydantic`, and
+  `python-multipart`; `httpx` and `python-dotenv` are declared but unused.
+- Consequence: adding a key to `.env` today would have **no effect**. A provider
+  abstraction has to be implemented before any key can be wired in.
+
+### 8.3 Provider-availability honesty fix
+
+Before the fix, with the AI service running, `POST /api/v1/ai/copilot` returned
+`providerAvailable: true` while the answer text said "AI provider not configured".
+A reachable HTTP service was being reported as an operational model.
+
+Changed:
+
+- `apps/ai-service/main.py` — `/copilot/answer`, `/documents/validate`, and
+  `/predict/delay` now return `providerAvailable: false`.
+- `apps/api/src/ai/client.ts` — propagates the service flag and treats anything other
+  than an explicit `true` as unavailable.
+
+### 8.4 Runtime checks (13/13)
+
+```text
+PASS  GET /health                     persistenceMode=database
+PASS  GET /ready                      database=connected
+PASS  persistence is database         mode=database
+PASS  seeded EG ports                 count=18
+PASS  protected route rejects anonymous  status=401
+PASS  register + token
+PASS  GET /auth/me
+PASS  authenticated shipment list     items=0
+PASS  cross-tenant shipment blocked   status=404
+PASS  shipment created with port code origin resolved from code ALY
+PASS  AI reports no provider          providerAvailable=False confidence=0
+PASS  delay prediction reports no model method=placeholder-interface days=0
+PASS  ai-service reachable            service=naql-ai-service
+```
+
+### 8.5 Test and build results
+
+| Command | Result |
+|---|---|
+| `pnpm --filter @naql/api typecheck` | pass |
+| `pnpm --filter @naql/api build` | pass |
+| `pnpm --filter @naql/api test` (with `.env`) | 19 passed / 4 files |
+| `NAQL_DISABLE_ENV_FILE=1 pnpm --filter @naql/api test` | 17 passed, 2 skipped |
+| `pnpm --filter @naql/web typecheck` | pass |
+| `pnpm --filter @naql/web build` (`NEXT_DIST_DIR=.next-verify`) | compiled successfully, 20/20 static pages |
+
+`apps/ai-service` has no automated test suite. Its endpoints were exercised manually:
+`/health`, `/copilot/answer`, and `/landed-cost` (deterministic math: 1000 + 200 + 50 +
+100 duty + 30 fees = 1380; 14% tax = 193.20; total = 1573.20).
+
+### 8.6 Secrets hygiene
+
+- `apikey.txt` and `.env` are both git-ignored.
+- `.env` contains only local development values (database URL, JWT secret, CORS
+  origins) and **no provider key**.
+- No secret was printed in any command, log, document, or report.
+

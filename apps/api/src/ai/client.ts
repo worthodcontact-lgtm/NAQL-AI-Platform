@@ -41,7 +41,9 @@ export async function callCopilot(payload: CopilotRequest): Promise<CopilotResul
     clearTimeout(timeout);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
-    return { ...json, providerAvailable: true } as CopilotResult;
+    // The service reports whether a model provider is actually configured. Only that
+    // flag may claim availability; a reachable HTTP service is not an operational model.
+    return { ...json, providerAvailable: json?.providerAvailable === true } as CopilotResult;
   } catch {
     return {
       answer: "AI provider unavailable. Configure AI_SERVICE_URL or an LLM provider. This is a labeled development fallback; no model output was generated.",
@@ -66,7 +68,8 @@ export async function predictDelay(payload: DelayPredictionRequest): Promise<Del
     clearTimeout(timeout);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
-    return { ...json, providerAvailable: true } as DelayPredictionResult;
+    // A reachable service without a configured model must not report availability.
+    return { ...json, providerAvailable: json?.providerAvailable === true } as DelayPredictionResult;
   } catch {
     return {
       estimatedDelayDays: 0,

@@ -11,6 +11,9 @@ import { fileURLToPath } from "node:url";
  * and restored afterwards, so an explicit `$env:DATABASE_URL=...` is never overridden.
  */
 function loadEnvFiles(files: string[]) {
+  // Escape hatch for tests and CI that must exercise the in-memory fallback path.
+  if (process.env.NAQL_DISABLE_ENV_FILE === "1") return;
+
   const loader = (process as any).loadEnvFile;
   if (typeof loader !== "function") return;
 

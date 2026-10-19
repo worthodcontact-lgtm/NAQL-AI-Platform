@@ -86,6 +86,16 @@ pnpm --filter @naql/api test
 Expected with a database: 19 passing tests across 4 files. Without one: 17 passing and
 2 skipped.
 
+Because the API loads the root `.env`, a checked-out `.env` makes the suite run against
+PostgreSQL even if the shell has no `DATABASE_URL`. To exercise the in-memory fallback
+deliberately, disable env-file loading for that run:
+
+```powershell
+$env:NAQL_DISABLE_ENV_FILE="1"
+pnpm --filter @naql/api test
+Remove-Item Env:\NAQL_DISABLE_ENV_FILE
+```
+
 ## 4. Run the application
 
 ```powershell
