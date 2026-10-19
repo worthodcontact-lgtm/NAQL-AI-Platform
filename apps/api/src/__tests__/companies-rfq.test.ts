@@ -58,7 +58,7 @@ describe("company directory and verification", () => {
     await cleanupPlatformUser(reviewer.id);
   });
 
-  it("prevents a non-staff user from verifying a company", async () => {
+  it.skipIf(!hasDatabase)("prevents a non-staff user from verifying a company", async () => {
     const owner = await register(`owner3-${Date.now()}@example.com`);
     const create = await app.inject({
       method: "POST", url: "/api/v1/companies/register",

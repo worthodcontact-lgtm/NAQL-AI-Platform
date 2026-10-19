@@ -120,6 +120,24 @@ python -m uvicorn main:app --reload --port 8000
 Without a configured provider the AI endpoints return an explicitly labelled fallback.
 They never fabricate an answer.
 
+## Railway (API)
+
+Keep the Railway service root at the repository root so pnpm can read
+`pnpm-workspace.yaml` and `pnpm-lock.yaml`. The root `package.json` pins pnpm 9.15.0 and
+requires Node.js 20 or newer. Configure the service with:
+
+| Setting | Value |
+|---|---|
+| Install command | `pnpm install --frozen-lockfile --prod=false` |
+| Build command | `pnpm --filter @naql/api build` |
+| Start command | `pnpm --filter @naql/api start` |
+
+The API build generates Prisma Client from `apps/api/prisma/schema.prisma` before
+compiling, and emits production JavaScript to `apps/api/dist`. Set `NODE_ENV=production`,
+a PostgreSQL `DATABASE_URL`, a randomly generated `JWT_SECRET` of at least 32 characters,
+and an explicit `CORS_ORIGINS` allow-list in Railway's service variables. Do not put
+credentials in build commands or source control.
+
 ## Persistence behaviour
 
 - `DATABASE_URL` set → `persistenceMode: "database"`. Data survives restarts.
