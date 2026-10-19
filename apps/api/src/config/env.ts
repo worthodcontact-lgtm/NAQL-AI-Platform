@@ -42,6 +42,10 @@ const envSchema = z.object({
   PORT: z.string().default("4000"),
   DATABASE_URL: z.string().optional(),
   JWT_SECRET: z.string().default("dev-only-secret-change-me"),
+  /** Lifetime of ordinary application tokens. */
+  JWT_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/).default("12h"),
+  /** Lifetime of administration tokens; deliberately shorter than app tokens. */
+  ADMIN_JWT_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/).default("8h"),
   AI_SERVICE_URL: z.string().default("http://127.0.0.1:8000"),
   AI_REQUEST_TIMEOUT_MS: z.string().default("5000"),
   /** Comma-separated allow-list. Required in production. */
@@ -60,7 +64,24 @@ const envSchema = z.object({
   COMTRADE_REQUEST_TIMEOUT_MS: z.string().default("12000")
 });
 
-export const env = envSchema.parse(process.env);
+const parsedEnv = envSchema.parse(process.env);
+
+/**
+ * Production must never run with the development JWT secret or a permissive
+ * CORS configuration. Failing at start-up is safer than serving signed tokens
+ * that anyone who has read the repository can forge.
+ */
+if (parsedEnv.NODE_ENV === "production") {
+  const jwtSecret = parsedEnv.JWT_SECRET.trim();
+  if (jwtSecret === "dev-only-secret-change-me" || jwtSecret.length < 32) {
+    throw new Error("JWT_SECRET must be a random value of at least 32 characters when NODE_ENV=production.");
+  }
+  if (!parsedEnv.CORS_ORIGINS || parsedEnv.CORS_ORIGINS.trim() === "") {
+    throw new Error("CORS_ORIGINS must contain an explicit allow-list when NODE_ENV=production.");
+  }
+}
+
+export const env = parsedEnv;
 export const AI_REQUEST_TIMEOUT_MS = Number(env.AI_REQUEST_TIMEOUT_MS);
 
 export const isProduction = env.NODE_ENV === "production";

@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { buildApp } from "../app.js";
+import { cleanupPlatformUser, createPlatformAdmin } from "./helpers/admin.js";
 
 let app: any;
+const hasDatabase = Boolean(process.env.DATABASE_URL);
 
 beforeAll(async () => { app = await buildApp(); await app.ready(); });
 afterAll(async () => { await app.close(); });
@@ -29,7 +31,7 @@ describe("company directory and verification", () => {
     expect(found.verificationStatus).toBe("unregistered");
   });
 
-  it("allows a reviewer to approve a company and records a review", async () => {
+  it.skipIf(!hasDatabase)("allows a reviewer to approve a company and records a review", async () => {
     const owner = await register(`owner2-${Date.now()}@example.com`);
     const create = await app.inject({
       method: "POST", url: "/api/v1/companies/register",
@@ -39,17 +41,21 @@ describe("company directory and verification", () => {
     const companyId = JSON.parse(create.payload).id;
     await app.inject({ method: "POST", url: `/api/v1/companies/${companyId}/submit`, headers: { authorization: `Bearer ${owner}` }, payload: {} });
 
-    const reviewer = await register(`reviewer-${Date.now()}@example.com`);
+    const reviewer = await createPlatformAdmin(app, "REVIEWER");
+    expect(reviewer.login.statusCode).toBe(200);
+
     const approve = await app.inject({
       method: "POST", url: `/api/v1/admin/companies/${companyId}/verify`,
-      headers: { authorization: `Bearer ${reviewer}` },
+      headers: { authorization: `Bearer ${reviewer.token}` },
       payload: { decision: "approved", notes: "documents ok" }
     });
     expect(approve.statusCode).toBe(200);
-    expect(JSON.parse(approve.payload).verificationStatus).toBe("verified");
+    expect(JSON.parse(approve.payload).company.verificationStatus).toBe("verified");
 
-    const audit = await app.inject({ method: "GET", url: "/api/v1/admin/audit", headers: { authorization: `Bearer ${reviewer}` } });
+    const audit = await app.inject({ method: "GET", url: "/api/v1/admin/audit-logs", headers: { authorization: `Bearer ${reviewer.token}` } });
     expect(JSON.parse(audit.payload).items.some((a: any) => a.action === "company.verify.approved")).toBe(true);
+
+    await cleanupPlatformUser(reviewer.id);
   });
 
   it("prevents a non-staff user from verifying a company", async () => {
@@ -66,6 +72,7 @@ describe("company directory and verification", () => {
       payload: { decision: "approved" }
     });
     expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.payload).code).toBe("admin_session_required");
   });
 });
 
@@ -205,39 +212,47 @@ describe("RFQ, quote, and booking workflow", () => {
   });
 });
 
-describe("account type selection (development hint)", () => {
-  async function registerWith(accountType: string) {
+describe("registration privilege boundaries", () => {
+  it("never grants a platform role, even when a client submits an accountType", async () => {
     const res = await app.inject({
       method: "POST", url: "/api/v1/auth/register",
-      payload: { email: `typed-${accountType}-${Date.now()}@example.com`, password: "password123", displayName: "Typed", accountType }
+      payload: {
+        email: `typed-admin-${Date.now()}@example.com`,
+        password: "password123",
+        displayName: "Typed Admin",
+        accountType: "admin"
+      }
     });
     expect(res.statusCode).toBe(200);
-    return JSON.parse(res.payload);
-  }
-
-  it("maps an explicit reviewer account type to reviewer roles", async () => {
-    const { user } = await registerWith("reviewer");
-    expect(user.roles).toContain("REVIEWER");
-    expect(user.roles).not.toContain("SUPER_ADMIN");
+    const body = JSON.parse(res.payload);
+    expect(body.user.roles).toEqual(["ORG_ADMIN"]);
+    expect(body.user.platformRole).toBeNull();
   });
 
-  it("maps an explicit admin account type to SUPER_ADMIN", async () => {
-    const { user } = await registerWith("admin");
-    expect(user.roles).toContain("SUPER_ADMIN");
-  });
-
-  it("keeps customer and company accounts as ordinary organization admins", async () => {
-    const customer = await registerWith("customer");
-    const company = await registerWith("company");
-    expect(customer.user.roles).toEqual(["ORG_ADMIN"]);
-    expect(company.user.roles).toEqual(["ORG_ADMIN"]);
-  });
-
-  it("rejects an unknown account type", async () => {
+  it("ignores unknown privilege hints instead of elevating the account", async () => {
     const res = await app.inject({
       method: "POST", url: "/api/v1/auth/register",
-      payload: { email: `bad-type-${Date.now()}@example.com`, password: "password123", displayName: "Bad", accountType: "root" }
+      payload: {
+        email: `bad-type-${Date.now()}@example.com`,
+        password: "password123",
+        displayName: "Bad Type",
+        accountType: "root"
+      }
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.payload).user.platformRole).toBeNull();
+  });
+
+  it("does not grant platform authority for an 'admin' email prefix", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/v1/auth/register",
+      payload: {
+        email: `admin-${Date.now()}@example.com`,
+        password: "password123",
+        displayName: "Admin Prefix"
+      }
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.payload).user.platformRole).toBeNull();
   });
 });

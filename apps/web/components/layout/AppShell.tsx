@@ -8,7 +8,8 @@ import {
   ACCOUNT_KIND_PORTAL,
   ACCOUNT_KIND_TONE_DARK,
   describeRoles,
-  isPlatformStaffRole
+  isPlatformStaffRole,
+  roleLabel
 } from "@/lib/auth";
 import PersistenceBanner from "@/components/layout/PersistenceBanner";
 
@@ -34,8 +35,8 @@ function isActive(pathname: string, href: string) {
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { user, kind, logout } = useAuth();
-  const isStaff = Boolean(user && isPlatformStaffRole(user.roles));
-  const links = isStaff ? [...nav, { href: "/admin", label: "إدارة المنصة" }] : nav;
+  const isStaff = Boolean(user && isPlatformStaffRole(user));
+  const links = isStaff ? [...nav, { href: "/admin/login", label: "بوابة الإدارة" }] : nav;
   const initial = (user?.displayName ?? user?.email ?? "?").trim().charAt(0).toUpperCase();
 
   return (
@@ -56,6 +57,11 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           {user && (
             <p className="mt-2 text-[11px] leading-relaxed text-slate-300">
               الأدوار: <span className="text-slate-200">{describeRoles(user.roles)}</span>
+            </p>
+          )}
+          {user?.platformRole && (
+            <p className="mt-1 text-[11px] leading-relaxed text-teal">
+              دور المنصة: {roleLabel(user.platformRole)}
             </p>
           )}
         </div>

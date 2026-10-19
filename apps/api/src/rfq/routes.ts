@@ -2,7 +2,7 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { getAuthUser } from "../auth/routes.js";
-import { isPlatformStaff } from "../auth/roles.js";
+import { can, isPlatformStaff } from "../auth/roles.js";
 import { recordAudit } from "../audit/log.js";
 import { organizationOwnsCompany } from "../companies/ownership.js";
 import { devCompanies } from "../companies/routes.js";
@@ -145,7 +145,7 @@ export async function registerRfqRoutes(app: FastifyInstance) {
       if (!rfq) return notFound(reply);
       const isOwner = rfq.organizationId === user.organizationId;
       const isInvited = await Promise.all(rfq.recipients.map((r: any) => ownsCompanyDb(user.organizationId, r.companyId)));
-      if (!isOwner && !isInvited.some(Boolean) && !isPlatformStaff(user)) return forbidden(reply);
+      if (!isOwner && !isInvited.some(Boolean) && !can(user, "rfqs.read")) return forbidden(reply);
       return rfq;
     }
     const rfq = devRfqs.find((r) => r.id === id);
@@ -153,7 +153,7 @@ export async function registerRfqRoutes(app: FastifyInstance) {
     const isOwner = rfq.organizationId === user.organizationId;
     const invitedChecks = await Promise.all(rfq.recipients.map((r: any) => organizationOwnsCompany(user.organizationId, r.companyId)));
     const isInvited = invitedChecks.some(Boolean);
-    if (!isOwner && !isInvited && !isPlatformStaff(user)) return forbidden(reply);
+    if (!isOwner && !isInvited && !can(user, "rfqs.read")) return forbidden(reply);
     return { ...rfq, quotes: devQuotesList.filter((q) => q.rfqId === id), devFallback: true };
   });
 
@@ -300,7 +300,7 @@ export async function registerRfqRoutes(app: FastifyInstance) {
     const isProvider = providerCompanyId
       ? await organizationOwnsCompany(user.organizationId, providerCompanyId)
       : false;
-    if (!isProvider && !isPlatformStaff(user)) return forbidden(reply);
+    if (!isProvider && !(isPlatformStaff(user) && can(user, "bookings.manage"))) return forbidden(reply);
 
     if (booking.status === "confirmed" || booking.status === "rejected" || booking.status === "cancelled") {
       return reply.code(409).send({ error: `Booking is already ${booking.status}` });
@@ -356,7 +356,7 @@ export async function registerRfqRoutes(app: FastifyInstance) {
    */
   app.get("/api/v1/bookings", { onRequest: [app.authenticate] }, async (request) => {
     const user = getAuthUser(request);
-    const staff = isPlatformStaff(user);
+    const staff = can(user, "bookings.read");
 
     if (prisma) {
       const companies = await (prisma as any).company.findMany({
@@ -433,7 +433,7 @@ export async function registerRfqRoutes(app: FastifyInstance) {
     const isProvider = providerCompanyId
       ? await organizationOwnsCompany(user.organizationId, providerCompanyId)
       : false;
-    if (!isCustomer && !isProvider && !isPlatformStaff(user)) return forbidden(reply);
+    if (!isCustomer && !isProvider && !can(user, "bookings.read")) return forbidden(reply);
     return { ...booking, viewerRole: isCustomer ? "customer" : isProvider ? "provider" : "staff" };
   });
 
@@ -450,7 +450,7 @@ export async function registerRfqRoutes(app: FastifyInstance) {
     const isProvider = providerCompanyId
       ? await organizationOwnsCompany(user.organizationId, providerCompanyId)
       : false;
-    if (!isCustomer && !isProvider && !isPlatformStaff(user)) return forbidden(reply);
+    if (!isCustomer && !isProvider && !can(user, "bookings.manage")) return forbidden(reply);
 
     // Manual operational updates are always labelled with their source so they are
     // never confused with trusted carrier or integration tracking events.

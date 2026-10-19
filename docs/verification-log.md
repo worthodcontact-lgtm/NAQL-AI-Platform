@@ -363,3 +363,137 @@ compiled successfully, 21 static pages, `/trade` present (6.41 kB).
 - Trade data is not persisted; each process restart re-fetches from Comtrade.
 - Only the top 10 rows and a five-year window are exposed.
 - No historical archive, no HS-level drill-down, no CSV export.
+
+## 11. Platform administration (2026-10-19)
+
+### 11.1 Migration and schema
+
+```powershell
+$env:DATABASE_URL="postgresql://naql:naql@127.0.0.1:5433/naql_ai?schema=public"
+npx prisma migrate status
+```
+
+Result:
+
+```text
+3 migrations found in prisma/migrations
+Database schema is up to date!
+```
+
+The admin-phase migration is `20261019050000_admin_platform_roles`. It only adds
+`User.platformRole`, `User.status`, `User.sessionVersion`, `User.lastLoginAt`, and the
+`PlatformSetting` table. No existing column, row, or table was removed. It was applied with
+`migrate deploy` against the existing development database; the database was never reset.
+
+### 11.2 Typecheck, tests, builds
+
+```powershell
+pnpm --filter @naql/api typecheck
+pnpm --filter @naql/api test
+pnpm --filter @naql/api build
+pnpm --filter @naql/web typecheck
+$env:NEXT_DIST_DIR=".next-verify"; pnpm --filter @naql/web build
+```
+
+Result:
+
+```text
+API typecheck: pass
+API build: pass
+Tests: 6 files, 46/46 passed
+  admin.test.ts: 20/20
+  companies-rfq.test.ts: 9/9
+  trade.test.ts: 8/8
+  postgres-persistence.test.ts: 2/2
+  integration.test.ts: 6/6
+  landed-cost.test.ts: 1/1
+Web typecheck: pass
+Web production build: 34 static pages generated, 42 routes total, 20 under /admin
+```
+
+One existing test initially failed because the public company directory returned the first
+100 rows without deterministic ordering after repeated test runs. The query now orders by
+`createdAt desc`; the suite then passed 46/46.
+
+A clean-database replay was also run in a throwaway database (`naql_ai_migrate_verify`):
+
+```text
+createdb (via Prisma against the maintenance database)
+migrate deploy -> 3 migrations applied, "Database schema is up to date!"
+prisma:seed    -> 20 ports
+vitest run     -> 46/46 passed
+DROP DATABASE ... WITH (FORCE)
+```
+
+This proves the migration chain works from zero, independent of the existing development data.
+The development database was not modified by this replay.
+
+### 11.3 HTTP smoke test with throwaway accounts
+
+A temporary script provisioned three accounts through the real CLI, exercised the API over
+HTTP, then deleted the accounts, their memberships, their organizations, and their audit
+rows. Passwords and bootstrap secrets were generated in-process and never printed.
+
+```text
+super login: ok · scope=admin · role=SUPER_ADMIN · permissions=19
+anonymous /users -> 401 unauthorized
+ordinary token /overview -> 403 admin_session_required
+SUPER /overview,/reports,/audit-logs,/settings,/ports,/users,/companies,
+       /shipments,/bookings,/rfqs,/quotations,/platform-roles -> 200
+reviewer /users -> 200; suspend super -> 403 insufficient_permission; settings write -> 403
+support audit -> 403 insufficient_permission; settings read -> 200; settings write -> 403
+suspend reviewer -> 200; old token /me -> 403 account_suspended; reactivate -> 200
+audit query -> 200; entries=10; contains-password=false
+```
+
+A second pass exercised every detail route against real records and confirmed the response
+envelopes used by the console:
+
+```text
+shipments  detail -> 200 (shipment);           missing id -> 404
+bookings   detail -> 200 (booking,organization); missing id -> 404
+rfqs       detail -> 200 (rfq,organization);   missing id -> 404
+quotations detail -> 200 (quote,rfqOrganization); missing id -> 404
+companies  detail -> 200 (company,organization); missing id -> 404
+```
+
+The smoke test exposed a real CLI defect: pnpm forwards the literal `--` separator to the
+script on this version, so `admin -- create` was parsed as an unknown command. The CLI now
+accepts both forms; provisioning, role assignment, suspension, and reactivation were then
+verified end to end.
+
+### 11.4 Browser verification
+
+`http://localhost:3000/admin/login` rendered the Arabic administrative login form with:
+
+- email and password inputs, submit button;
+- the explicit notice that customer/company accounts do not grant admin access;
+- links to ordinary login and the public site.
+
+With an **ordinary application token already present** in `localStorage`, navigating to
+`http://localhost:3000/admin/dashboard` redirected to:
+
+```text
+/admin/login?next=%2Fadmin%2Fdashboard
+```
+
+This confirms the console does not accept the customer session as an admin session. The
+authenticated console pages were then exercised through the API (11.3), not by typing
+credentials into the browser.
+
+### 11.5 Public registration cannot request a platform role
+
+The registration page no longer offers “reviewer” or “platform admin” account types, and it
+no longer sends an `accountType` field. The API ignores any client-supplied `accountType`
+regardless (covered in `companies-rfq.test.ts` by two tests that post `admin` and `root`), so
+there is no path from public registration to `User.platformRole`.
+
+Verified in the browser after the change: `/register` renders only the `customer` and `company`
+choices, contains no “مراجع تحقق” or “مدير منصة” option, and sends no `accountType` field.
+
+### 11.6 Not verified automatically
+
+- No browser E2E suite clicks through every console page.
+- No MFA or IP allow-list.
+- No load test of the audit-log queries.
+

@@ -9,11 +9,11 @@ import { useAuth } from "@/components/providers/AuthProvider";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
+// These are ordinary platform accounts only. Neither choice grants platform
+// authority: administration is provisioned out-of-band by the server CLI.
 const ACCOUNT_TYPES = [
   { value: "customer", label: "عميل / مستورد / مصدّر", hint: "تنشئ طلبات عروض، ومتابعة شحنات وتكاليف." },
-  { value: "company", label: "شركة أو مزوّد خدمة", hint: "شحن، نقل، تخليص، تخزين. تُرسل ملفها للمراجعة." },
-  { value: "reviewer", label: "مراجع تحقق (NAQL AI)", hint: "يراجع ملفات الشركات ويقرّر القبول أو الرفض." },
-  { value: "admin", label: "مدير منصة (NAQL AI)", hint: "إدارة كاملة وسجل تدقيق." }
+  { value: "company", label: "شركة أو مزوّد خدمة", hint: "شحن، نقل، تخليص، تخزين. تُرسل ملفها للمراجعة." }
 ];
 
 export default function RegisterPage() {
@@ -38,14 +38,13 @@ export default function RegisterPage() {
           displayName: name,
           email,
           password,
-          organizationName: organizationName || undefined,
-          accountType
+          organizationName: organizationName || undefined
         })
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error ?? "فشل إنشاء الحساب");
       login(json.token);
-      window.location.href = accountType === "reviewer" || accountType === "admin" ? "/admin" : "/dashboard";
+      window.location.href = "/dashboard";
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error");
     } finally {
@@ -85,9 +84,9 @@ export default function RegisterPage() {
                 </label>
               ))}
             </div>
-            <p className="rounded-lg bg-warning/10 px-3 py-2 text-xs text-warning">
-              ملاحظة صريحة: اختيار النوع هنا يعمل في <b>وضع التطوير</b> فقط (بدون قاعدة بيانات). في الإنتاج تُمنح
-              الأدوار الإدارية من صلاحيات المنظمة بعد المراجعة، ولا يمنحها المستخدم لنفسه.
+            <p className="rounded-lg bg-warning/10 px-3 py-2 text-xs leading-relaxed text-warning">
+              ملاحظة صريحة: لا يمنح أي تسجيل عام — بما فيه اختيار «شركة» — أي صلاحية إدارية. حسابات لوحة الإدارة
+              تُنشأ فقط عبر أداة الخادم المحمية، ولا يمكن ترقية حساب من داخل التطبيق.
             </p>
           </fieldset>
 

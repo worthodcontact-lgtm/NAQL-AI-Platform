@@ -48,11 +48,10 @@ with no body and no file, then records the result as a validation outcome.
 Planned resolution: stream the stored object through an authenticated multipart request,
 and record extraction provenance.
 
-### S4 — MEDIUM — Permissive CORS in development — PARTIAL
+### S4 — MEDIUM — Permissive CORS in development — FIXED
 
-Development still reflects any origin for convenience. `CORS_ORIGINS` is now supported and
-takes precedence, and production returns an empty allow-list when it is unset. A hard
-start-up failure in production is not implemented yet.
+Development still reflects any origin for convenience. `CORS_ORIGINS` is supported and takes
+precedence; production now refuses to start when the allow-list is empty or missing.
 
 ### S5 — MEDIUM — Silent in-memory fallback in production — FIXED
 
@@ -68,20 +67,23 @@ if (isProduction && !env.DATABASE_URL) {
 `/health` reports `persistenceMode: "database" | "memory"` and `/ready` performs a real
 `SELECT 1`. The web app shows a warning banner whenever the API reports memory mode.
 
-### S6 — MEDIUM — Rate limiting is global only — OPEN
+### S6 — MEDIUM — Rate limiting is global only — PARTIAL
 
-A single 100 request/minute limit applies to every route equally. Authentication, password
-reset, uploads, and AI endpoints need stricter, separate budgets.
+The global budget is 100 requests/minute. Login and registration routes now have explicit
+20/minute limits, including the separate admin login; the 429 path is covered by an automated
+test. Uploads and AI endpoints still share the global budget, and the store is in-process (see
+the Redis/`trustProxy` note in `docs/platform-admin.md` §10).
 
 ### S7 — LOW — Structured logging disabled — FIXED
 
 `Fastify({ logger: { level } })` with a UUID `genReqId`. Requests are logged with an id,
 status code, and response time, which is what made the E2E diagnosis possible.
 
-### S8 — LOW — Development role hints are client-driven — MITIGATED
+### S8 — LOW — Development role hints are client-driven — FIXED
 
-Registration accepts `accountType` and maps it to roles. It is honoured **only** when
-`NODE_ENV !== "production"`. In production, roles come from `Membership` records only.
+Registration no longer accepts `accountType` or any role hint in either mode. The API ignores
+unknown fields and never writes `platformRole`; a regression test submits a forged
+`accountType: "ADMIN"` and confirms the resulting account has no platform role.
 
 ## Verified protections
 
@@ -103,6 +105,56 @@ Registration accepts `accountType` and maps it to roles. It is honoured **only**
 ## Outstanding verification required
 
 - Cross-tenant file download attempts once real uploads exist.
-- Token revocation once sessions are persisted.
 - Frontend accessibility and dependency audit.
 - Production CORS fail-fast.
+
+## Admin-phase update (2026-10-19)
+
+The baseline review above predates the platform-administration phase. Two statements are now
+outdated:
+
+- **Platform authority no longer comes from `Membership`.** It comes exclusively from
+  `User.platformRole`. Organization roles remain organization-scoped and cannot open the admin
+  area.
+- **Token revocation is implemented for platform accounts.** `User.sessionVersion` is embedded
+  as `sv`; suspension, reactivation, role changes, and password resets increment it, and the
+  database is consulted on every request.
+
+Additional controls verified by tests:
+
+| Control | Evidence |
+|---|---|
+| Ordinary token rejected by the admin namespace | `403 admin_session_required`; tested |
+| Ordinary account cannot obtain an admin token | `403 not_platform_staff`; tested |
+| Company ownership does not grant platform authority | tested |
+| Reviewer cannot perform Super-Admin-only operations | `403 insufficient_permission`; tested |
+| Support is read-mostly | audit read and settings write denied; tested |
+| Self-elevation and self-suspension blocked | tested |
+| Last active Super Admin protected | API guard + unit test |
+| Suspension revokes an existing token | old token → `403 account_suspended`; tested |
+| Role change revokes existing privileges | old token → `401 session_revoked`; tested |
+| Audit entries contain no credentials | redaction unit test + live query inspection |
+| Migration is additive | migration test asserts no `DROP`/destructive statement |
+
+### Hardening audit (2026-10-19)
+
+Confirmed issues found by probing the running application and fixed in this pass:
+
+| ID | Severity | Issue | Fix / evidence |
+|---|---|---|---|
+| H1 | HIGH | Admin JWTs had no `exp`; a leaked token was valid until manual revocation | Admin TTL 8h, app TTL 12h; legacy no-exp admin tokens → `401 session_expired`; tested |
+| H2 | HIGH | Admin logout only cleared `localStorage`; a copied token still worked | Logout increments `sessionVersion`; old token → `401 session_revoked`; tested |
+| H3 | HIGH | Platform business overrides worked with an ordinary app token | `can()`/`isPlatformStaff()` require `scope: "admin"`; ordinary token cross-tenant RFQ read → `403`; tested |
+| H4 | HIGH | Production accepted the default `JWT_SECRET` and empty CORS list | Start-up refuses weak/missing secret and empty CORS in production |
+| H5 | MEDIUM | Last-Super-Admin guard was count-then-update (TOCTOU) | PostgreSQL advisory lock inside one transaction; API and CLI use the same helper |
+| H6 | MEDIUM | `to=YYYY-MM-DD` excluded records after midnight | `to` is end-of-day UTC for audit, users, shipments, bookings, RFQs, quotes; tested |
+| H7 | MEDIUM | Unlisted companies were readable by guessing their public ID | Public profile requires `listed: true`; owner uses `/companies/mine`; tested |
+| H8 | MEDIUM | High-risk mutation and audit row could diverge; audit failures were swallowed | Transaction-scoped strict audit for role/suspension, verification, settings, ports, CLI |
+| H9 | LOW | Default Fastify errors could expose Prisma/SQL text | Generic `500 internal_error` + request ID; server-side log only |
+| H10 | LOW | No admin response security headers | `no-store`, `nosniff`, frame/referrer/permissions headers on API and web |
+| H11 | LOW | Clearing optional settings failed email validation | Empty `supportEmail`/`maintenanceMessage` deletes the setting; tested |
+
+Residual risks are enumerated in `docs/platform-admin.md` §10: localStorage tokens (cookie/CSRF
+migration proposed, not implemented), no MFA, client-side UX guard, all-session logout coupling,
+best-effort login/logout audit, per-process rate limiting, and the absence of browser E2E coverage.
+

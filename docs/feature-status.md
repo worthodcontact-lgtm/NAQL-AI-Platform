@@ -20,21 +20,25 @@ command whose result is recorded in `docs/verification-log.md`.
 | Central 401 handling | Done | `lib/api.ts` |
 | Roles persisted per organization | Done | `Membership` rows, unique per (org, user, role); verified in database mode |
 | Multi-role memberships | Done | `Membership_organizationId_userId_role_key` migration applied |
-| Account-type selection | Done (dev only) | now honoured in **both** database and fallback mode; ignored when `NODE_ENV=production` |
-| Password reset | Missing | no token model |
+| Separate platform roles | Done | `User.platformRole`; independent of organization membership |
+| Admin login separated from ordinary login | Done | `/api/v1/admin/auth/login`, `scope: "admin"`, dedicated storage key; tested |
+| Permission matrix enforced in API | Done | `auth/permissions.ts` + `requirePermission` on every admin route; 28 admin security/integration tests (54 total) |
+| Session revocation on suspension/role change/logout | Done | `User.sessionVersion` in token; stale `sv` → `401 session_revoked`; logout revokes server-side |
+| Token expiry | Done | admin 8h, app 12h; legacy admin tokens without `exp` rejected |
+| Password reset | Partial | platform admins only, via protected CLI (`admin -- reset-password`); no self-service token flow |
 | Email verification | Missing | no mail adapter |
 | MFA | Missing | — |
-| Session/device revocation | Missing | stateless JWTs |
-| Permission matrix | Missing | roles are checked ad hoc per route |
 
 ## Company directory and verification
 
 | Feature | Status | Evidence / gap |
 |---|---|---|
 | Company registration / submit | Done | tested in both modes |
-| Public directory with verification state | Done | unregistered companies are not shown as verified |
-| Reviewer approve / reject / needs_information | Done | reviewer role now works in database mode too |
-| Separation of verification from management | Done | non-staff → 403 |
+| Public directory with verification state | Done | unregistered companies are not shown as verified; unlisted companies are absent from both the directory and direct public profile lookup |
+| Reviewer approve / reject / needs_information | Done | `POST /api/v1/admin/companies/:id/verify`; reason required for non-approval; tested |
+| Verification decision history | Done | `CompanyReview` rows shown in the admin company file; audited |
+| Separation of verification from management | Done | `companies.verify` permission; own-organization conflict blocked; non-staff → 403 |
+| Government accreditation claim | Not claimed | UI and docs state that verification is an internal review only |
 | Company document upload (real file) | Missing | metadata endpoint only |
 | Organization member management | Missing | — |
 
@@ -109,32 +113,64 @@ Nothing in this section may be described as working until a provider is configur
 | Trade data persisted locally | Missing | fetched live and cached in memory only; lost on restart (re-fetched) |
 | Full commodity detail / historical archive | Missing | only top 10 and a five-year window |
 
+## Platform administration
+
+| Feature | Status | Evidence / gap |
+|---|---|---|
+| Independent admin login | Done | `POST /api/v1/admin/auth/login`; rejects ordinary accounts with `not_platform_staff`; rate-limited |
+| Roles and least-privilege matrix | Done | SUPER_ADMIN / ADMIN / REVIEWER / SUPPORT; matrix in `auth/permissions.ts`; documented in `docs/platform-admin.md` |
+| Protected first Super Admin provisioning | Done | server-side CLI with `ADMIN_BOOTSTRAP_SECRET`, bcrypt 12, masked password; no public elevation path |
+| User search, detail, memberships | Done | `/api/v1/admin/users`; bounded pagination; no password/session fields exposed |
+| Suspend / reactivate with reason | Done | audited; increments `sessionVersion`; self-suspend blocked |
+| Platform role assignment | Done | Super-Admin-only; self-elevation blocked; last-active-Super-Admin guard |
+| Companies directory | Done | searchable and filterable; verification status shown honestly |
+| Verification queue and decisions | Done | approve / reject / request information with documented reason; audited |
+| Shipments / bookings / RFQs / quotations views | Done | read-only, paginated, no invented prices or coordinates |
+| Ports reference editing | Done | only `name`, `type`, `source`; coordinates immutable; audited |
+| Dashboard metrics | Done | real `count`/`groupBy` queries; `503` on failure instead of fabricated values |
+| Reports | Done | status distributions, top organizations, per-currency quote totals |
+| Persistent audit log | Done | append-only through the app; actor, role, action, entity, outcome, request ID, redacted metadata; high-risk mutations commit atomically with their audit row |
+| Platform settings | Partial | only `platformName`, `supportEmail`, `maintenanceMessage`; no env/secret editor |
+| Admin web console | Done | 20 routes under `/admin`; Arabic RTL, permission-gated navigation, confirmation dialogs |
+| Admin MFA / IP allow-list | Missing | — |
+| Admin browser E2E suite | Missing | API authorization is covered; UI verified by typecheck, build, and unauthenticated browser smoke checks |
+| Admin session storage | Partial | short-lived Bearer token in `localStorage`; server-side revocation works, but HttpOnly cookie + CSRF migration is proposed only (`docs/platform-admin.md` §10.1) |
+
 ## Platform
 
 | Feature | Status | Evidence / gap |
 |---|---|---|
-| Admin overview / companies / audit | Done | staff-only, tested |
-| Structured logging + request correlation | Done | pino with `genReqId`; visible in the E2E run |
+| Admin console | Done | see **Platform administration** above; 20 web routes |
+| Structured logging + request correlation | Done | pino with `genReqId`; request ID recorded in audit entries |
 | Explicit persistence mode | Done | `/health` reports `database` or `memory`; UI banner in fallback mode |
 | Production fail-fast without a database | Done | API refuses to start when `NODE_ENV=production` and `DATABASE_URL` is absent |
 | Decimal / date normalisation | Done | one `preSerialization` hook; identical shapes in both modes |
 | Notifications | Missing | — |
 | Analytics | Missing | placeholder page |
-| Settings | Missing | placeholder page |
+| Settings | Partial | three whitelisted platform settings with Super-Admin-only writes; external providers shown by configuration presence only |
 | Customs broker portal | Missing | — |
 | Carrier / warehouse workflows | Missing | — |
 | CSV import / export | Missing | — |
 | i18n (Arabic + English) | Missing | Arabic hardcoded |
-| Rate limiting per sensitive route | Partial | global 100/min only |
-| CORS allow-list | Partial | `CORS_ORIGINS` supported; empty allow-list in production is not yet enforced as a hard failure |
+| Rate limiting per sensitive route | Done | admin login, ordinary login, and registration limited to 20/min; global 100/min; 429 exercised by a test; in-process store (Redis/multi-instance is future work) |
+| CORS allow-list | Done | `CORS_ORIGINS` supported; production refuses to start with an empty allow-list |
+| Production secret hygiene | Done | production refuses to start with the development `JWT_SECRET` or a secret shorter than 32 characters |
+| Backup / restore | Missing | no verified automated `pg_dump`/restore mechanism in the repository |
 | CI | Missing | — |
 | E2E browser tests | Missing | API-level E2E exists |
 
 ## Verified this session
 
 - PostgreSQL 16 running natively, no administrator rights, no Docker.
-- Two migrations applied; seed created 20 ports.
+- Three migrations applied additively; the admin migration preserves all existing rows.
 - Data survives an API restart (same company id before and after).
-- 19/19 automated tests pass with `DATABASE_URL`; 17 pass and 2 skip without it.
-- 18/18 API end-to-end checks pass against the real database.
-- Production web build succeeds: 22 routes.
+- 54/54 automated tests pass against the existing development database **and** against a
+  freshly migrated, seeded throwaway database (which was dropped afterwards).
+- API typecheck and build pass; web typecheck and production build pass.
+- Production web build: 42 routes, including 20 `/admin` routes.
+- Admin login, dashboard metrics, suspension, role change, verification, settings, ports, and
+  audit generation are covered by API tests; the login page and unauthenticated guard were
+  also exercised in a real browser.
+- Hardening probes confirmed and fixed: missing token expiry, ineffective logout, ordinary-token
+  staff overrides, last-Super-Admin TOCTOU, end-of-day date filtering, unlisted-company lookup,
+  swallowed audit failures, production default JWT secret, and internal error leakage.

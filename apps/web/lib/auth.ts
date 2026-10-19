@@ -4,11 +4,15 @@ export interface TokenUser {
   displayName?: string;
   organizationId?: string;
   roles: string[];
+  /** Platform authority, independent of organization membership. */
+  platformRole?: string | null;
+  /** `admin` only on tokens issued by the administration login. */
+  scope?: "app" | "admin";
 }
 
 export const AUTH_EVENT = "naql-auth-change";
 
-export const PLATFORM_STAFF_ROLES = ["SUPER_ADMIN", "ADMIN", "REVIEWER", "DATA_OPERATOR"];
+export const PLATFORM_STAFF_ROLES = ["SUPER_ADMIN", "ADMIN", "REVIEWER", "SUPPORT"];
 
 /**
  * Decodes a JWT payload without verifying it.
@@ -36,7 +40,9 @@ export function decodeToken(token: string): TokenUser | null {
       email: String(data?.email ?? ""),
       displayName: data?.displayName,
       organizationId: data?.organizationId ? String(data.organizationId) : undefined,
-      roles: Array.isArray(data?.roles) ? data.roles.map(String) : []
+      roles: Array.isArray(data?.roles) ? data.roles.map(String) : [],
+      platformRole: data?.platformRole ? String(data.platformRole) : null,
+      scope: data?.scope === "admin" ? "admin" : "app"
     };
   } catch {
     return null;
@@ -79,8 +85,8 @@ export function subscribeAuth(callback: () => void): () => void {
   };
 }
 
-export function isPlatformStaffRole(roles: string[]): boolean {
-  return roles.some((r) => PLATFORM_STAFF_ROLES.includes(r));
+export function isPlatformStaffRole(user: TokenUser | null | undefined): boolean {
+  return Boolean(user?.platformRole);
 }
 
 export type AccountKind = "guest" | "customer" | "company" | "staff";
@@ -115,10 +121,11 @@ export const ACCOUNT_KIND_TONE_DARK: Record<AccountKind, string> = {
 };
 
 const ROLE_LABEL: Record<string, string> = {
-  SUPER_ADMIN: "مدير منصة",
-  ADMIN: "مشرف",
+  SUPER_ADMIN: "مدير منصة أعلى",
+  ADMIN: "مدير منصة",
   REVIEWER: "مراجع تحقق",
-  DATA_OPERATOR: "مشغّل جمع بيانات",
+  SUPPORT: "دعم فني",
+  DATA_OPERATOR: "مشغّل جمع بيانات (قديم)",
   ORG_ADMIN: "مدير المنظمة",
   COMPANY_MANAGER: "مدير شركة",
   OWNER: "مالك",

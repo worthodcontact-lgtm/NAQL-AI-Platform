@@ -32,7 +32,7 @@ const AuthContext = createContext<AuthContextValue>({
 });
 
 async function resolveKind(user: TokenUser): Promise<AccountKind> {
-  if (isPlatformStaffRole(user.roles)) return "staff";
+  if (isPlatformStaffRole(user)) return "staff";
   try {
     const res = await apiFetch("/api/v1/companies/mine");
     return (res?.items?.length ?? 0) > 0 ? "company" : "customer";

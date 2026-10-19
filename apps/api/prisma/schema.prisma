@@ -27,8 +27,21 @@ model User {
   organizationId String?
   organization   Organization? @relation(fields: [organizationId], references: [id])
   memberships    Membership[]
+  /// active | suspended — a suspended account cannot authenticate or use any token.
+  status         String       @default("active")
+  /// SUPER_ADMIN | ADMIN | REVIEWER | SUPPORT. Null for ordinary users.
+  /// Platform authority is never derived from an organization membership.
+  platformRole   String?
+  /// Incremented on suspension, platform-role change, or password reset. Tokens
+  /// carrying an older value are rejected, so privilege changes take effect at once.
+  sessionVersion Int          @default(0)
+  lastLoginAt    DateTime?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
+
+  @@index([platformRole])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model Membership {
@@ -141,11 +154,31 @@ model AuditLog {
   id             String   @id @default(cuid())
   organizationId String?
   actorUserId    String?
+  /// Platform role held by the actor at the time of the action.
+  actorRole      String?
   action         String
   entityType     String
   entityId       String?
+  /// success | denied | failure
+  outcome        String   @default("success")
+  /// Correlates the event with the request that produced it.
+  requestId      String?
+  /// JSON string. Never contains passwords, tokens, or other credentials.
   metadata       String?
   createdAt      DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([actorUserId])
+  @@index([action])
+  @@index([entityType, entityId])
+}
+
+model PlatformSetting {
+  /// Whitelisted key. Arbitrary environment variables are never stored here.
+  key             String   @id
+  value           String
+  updatedByUserId String?
+  updatedAt       DateTime @updatedAt
 }
 
 model Company {

@@ -2,7 +2,6 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { getAuthUser } from "../auth/routes.js";
-import { isPlatformStaff } from "../auth/roles.js";
 import { recordAudit } from "../audit/log.js";
 
 export const COMPANY_TYPES = ["forwarder", "carrier", "shipping", "air", "customs", "warehouse"] as const;
@@ -42,13 +41,7 @@ const registerSchema = z.object({
   services: z.array(z.object({ mode: z.string().min(1), originLocation: z.string().optional(), destinationLocation: z.string().optional(), notes: z.string().optional() })).optional()
 });
 
-const reviewSchema = z.object({
-  decision: z.enum(["approved", "rejected", "needs_information"]),
-  notes: z.string().optional()
-});
-
 function notFound(reply: any) { return reply.code(404).send({ error: "Not found" }); }
-function forbidden(reply: any) { return reply.code(403).send({ error: "Forbidden" }); }
 function slugify(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "company";
 }
@@ -120,6 +113,7 @@ export async function registerCompanyRoutes(app: FastifyInstance) {
       const items = await (prisma as any).company.findMany({
         where: { listed: true, ...(type ? { type } : {}), ...(q ? { name: { contains: q, mode: "insensitive" } } : {}) },
         select: { id: true, name: true, slug: true, type: true, country: true, verificationStatus: true, listed: true, status: true, description: true },
+        orderBy: { createdAt: "desc" },
         take: 100
       });
       return { items, disclaimer: "Directory listing is not an endorsement or verified partnership." };
@@ -139,14 +133,17 @@ export async function registerCompanyRoutes(app: FastifyInstance) {
   app.get("/api/v1/companies/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     if (prisma) {
-      const company = await (prisma as any).company.findUnique({
-        where: { id },
+      // The public profile is part of the directory contract: an unlisted
+      // company must not be discoverable by guessing or sharing its identifier.
+      // Owners read unlisted records through `/api/v1/companies/mine`.
+      const company = await (prisma as any).company.findFirst({
+        where: { id, listed: true },
         select: { id: true, name: true, slug: true, type: true, status: true, verificationStatus: true, listed: true, description: true, country: true, website: true, services: true }
       });
       if (!company) return notFound(reply);
       return company;
     }
-    const company = devCompanies.find((c) => c.id === id);
+    const company = devCompanies.find((c) => c.id === id && c.listed === true);
     if (!company) return notFound(reply);
     const { email, phone, organizationId, ...publicFields } = company;
     return { ...publicFields, devFallback: true };
@@ -190,39 +187,5 @@ export async function registerCompanyRoutes(app: FastifyInstance) {
     const doc = { id: `dev-cdoc-${company.documents.length + 1}`, ...parsed.data, status: "uploaded", uploadedAt: new Date().toISOString() };
     company.documents.push(doc);
     return { ...doc, devFallback: true };
-  });
-
-  app.post("/api/v1/admin/companies/:id/verify", { onRequest: [app.authenticate] }, async (request, reply) => {
-    const user = getAuthUser(request);
-    if (!isPlatformStaff(user)) return forbidden(reply);
-    const { id } = request.params as { id: string };
-    const parsed = reviewSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: "Invalid input", issues: parsed.error.issues });
-    const decision = parsed.data.decision;
-
-    const statusMap: Record<string, { status: string; verificationStatus: string }> = {
-      approved: { status: "approved", verificationStatus: "verified" },
-      rejected: { status: "rejected", verificationStatus: "rejected" },
-      needs_information: { status: "needs_information", verificationStatus: "pending" }
-    };
-    const next = statusMap[decision];
-
-    if (prisma) {
-      const company = await (prisma as any).company.findUnique({ where: { id } });
-      if (!company) return notFound(reply);
-      const updated = await (prisma as any).company.update({ where: { id }, data: next });
-      await (prisma as any).verificationReview.create({ data: { companyId: id, reviewerUserId: user.id, decision, notes: parsed.data.notes } });
-      await recordAudit({ actorUserId: user.id, action: `company.verify.${decision}`, entityType: "Company", entityId: id });
-      return updated;
-    }
-
-    const company = devCompanies.find((c) => c.id === id);
-    if (!company) return notFound(reply);
-    company.status = next.status;
-    company.verificationStatus = next.verificationStatus;
-    company.updatedAt = new Date().toISOString();
-    company.reviews.push({ id: `dev-rev-${company.reviews.length + 1}`, reviewerUserId: user.id, decision, notes: parsed.data.notes, createdAt: new Date().toISOString() });
-    await recordAudit({ actorUserId: user.id, action: `company.verify.${decision}`, entityType: "Company", entityId: id });
-    return { ...company, devFallback: true };
   });
 }
