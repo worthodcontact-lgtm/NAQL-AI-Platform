@@ -4,6 +4,7 @@ import { prisma } from "../db.js";
 import { getAuthUser } from "../auth/routes.js";
 import { isPlatformStaff } from "../auth/roles.js";
 import { recordAudit } from "../audit/log.js";
+import { organizationOwnsCompany } from "../companies/ownership.js";
 import { devCompanies } from "../companies/routes.js";
 
 type DevRfq = { id: string; organizationId: string; createdByUserId: string; origin: string; destination: string; mode: string; cargoDescription: string; weightKg: number; status: string; createdAt: string; updatedAt: string; recipients: any[] };
@@ -17,14 +18,9 @@ export const devBookings: DevBooking[] = [];
 function notFound(reply: any) { return reply.code(404).send({ error: "Not found" }); }
 function forbidden(reply: any) { return reply.code(403).send({ error: "Forbidden" }); }
 
-function ownsDevCompany(organizationId: string, companyId: string) {
-  return devCompanies.some((c) => c.id === companyId && c.organizationId === organizationId);
-}
-
+/** Provider-side authorization: the caller must own the company on the quote. */
 async function ownsCompanyDb(organizationId: string, companyId: string) {
-  if (!prisma) return ownsDevCompany(organizationId, companyId);
-  const company = await (prisma as any).company.findUnique({ where: { id: companyId } });
-  return Boolean(company && company.organizationId === organizationId);
+  return organizationOwnsCompany(organizationId, companyId);
 }
 
 export async function registerRfqRoutes(app: FastifyInstance) {
@@ -90,6 +86,57 @@ export async function registerRfqRoutes(app: FastifyInstance) {
     return { items: devRfqs.filter((r) => r.organizationId === user.organizationId), devFallback: true };
   });
 
+  /**
+   * Provider inbox: RFQs addressed to any company owned by the caller's organization.
+   * Authorization comes from company ownership, never from a client-supplied id.
+   */
+  app.get("/api/v1/rfqs/incoming", { onRequest: [app.authenticate] }, async (request) => {
+    const user = getAuthUser(request);
+
+    if (prisma) {
+      const companies = await (prisma as any).company.findMany({
+        where: { organizationId: user.organizationId },
+        select: { id: true, name: true }
+      });
+      if (companies.length === 0) return { items: [], companies: [] };
+      const companyIds = companies.map((c: any) => c.id);
+
+      const items = await (prisma as any).rfqRecipient.findMany({
+        where: { companyId: { in: companyIds } },
+        include: {
+          rfq: { include: { quotes: true } },
+          company: { select: { id: true, name: true } }
+        },
+        orderBy: { invitedAt: "desc" },
+        take: 100
+      });
+      return { items, companies };
+    }
+
+    const mine = devCompanies.filter((c) => c.organizationId === user.organizationId);
+    const mineIds = mine.map((c) => c.id);
+    const items = devRfqs
+      .filter((r) => r.recipients.some((rec: any) => mineIds.includes(rec.companyId)))
+      .map((r) => {
+        const myRecipient = r.recipients.find((rec: any) => mineIds.includes(rec.companyId));
+        const company = mine.find((c) => c.id === myRecipient?.companyId) ?? null;
+        return {
+          id: `dev-invite-${r.id}`,
+          rfqId: r.id,
+          status: myRecipient?.status ?? "invited",
+          invitedAt: (myRecipient as any)?.invitedAt ?? r.createdAt,
+          company: company ? { id: company.id, name: company.name } : null,
+          rfq: { ...r, quotes: devQuotesList.filter((q) => q.rfqId === r.id) },
+          devFallback: true
+        };
+      });
+    return {
+      items,
+      companies: mine.map((c) => ({ id: c.id, name: c.name })),
+      devFallback: true
+    };
+  });
+
   app.get("/api/v1/rfqs/:id", { onRequest: [app.authenticate] }, async (request, reply) => {
     const user = getAuthUser(request);
     const { id } = request.params as { id: string };
@@ -104,7 +151,8 @@ export async function registerRfqRoutes(app: FastifyInstance) {
     const rfq = devRfqs.find((r) => r.id === id);
     if (!rfq) return notFound(reply);
     const isOwner = rfq.organizationId === user.organizationId;
-    const isInvited = rfq.recipients.some((r) => ownsDevCompany(user.organizationId, r.companyId));
+    const invitedChecks = await Promise.all(rfq.recipients.map((r: any) => organizationOwnsCompany(user.organizationId, r.companyId)));
+    const isInvited = invitedChecks.some(Boolean);
     if (!isOwner && !isInvited && !isPlatformStaff(user)) return forbidden(reply);
     return { ...rfq, quotes: devQuotesList.filter((q) => q.rfqId === id), devFallback: true };
   });
@@ -208,57 +256,221 @@ export async function registerRfqRoutes(app: FastifyInstance) {
     return { ...booking, devFallback: true };
   });
 
-  app.get("/api/v1/bookings", { onRequest: [app.authenticate] }, async (request) => {
-    const user = getAuthUser(request);
+  /**
+   * Returns the company that must confirm this booking, plus the booking itself.
+   * The confirming authority is derived from the accepted quote, never from the client.
+   */
+  async function bookingWithAuthority(id: string) {
     if (prisma) {
-      const items = await (prisma as any).bookingRequest.findMany({ where: { organizationId: user.organizationId }, include: { trackingEvents: true }, orderBy: { createdAt: "desc" }, take: 100 });
-      return { items };
+      const booking = await (prisma as any).bookingRequest.findUnique({
+        where: { id },
+        include: { rfq: { include: { quotes: true } }, trackingEvents: true }
+      });
+      if (!booking) return null;
+      const quote = (booking.rfq?.quotes ?? []).find((q: any) => q.id === booking.quoteId);
+      return { booking, providerCompanyId: quote?.companyId as string | undefined };
     }
-    return { items: devBookings.filter((b) => b.organizationId === user.organizationId), devFallback: true };
-  });
+    const booking = devBookings.find((b) => b.id === id);
+    if (!booking) return null;
+    const quote = devQuotesList.find((q) => q.id === booking.quoteId);
+    return { booking, providerCompanyId: quote?.companyId };
+  }
 
-  app.post("/api/v1/bookings/:id/confirm", { onRequest: [app.authenticate] }, async (request, reply) => {
+  async function confirmOrRejectBooking(
+    request: any,
+    reply: any,
+    nextStatus: "confirmed" | "rejected"
+  ) {
     const user = getAuthUser(request);
     const { id } = request.params as { id: string };
-    const parsed = z.object({ externalReference: z.string().min(1), companyId: z.string().optional() }).safeParse(request.body);
+    const parsed = z
+      .object({ externalReference: z.string().min(1).optional(), reason: z.string().optional() })
+      .safeParse(request.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "Invalid input", issues: parsed.error.issues });
 
+    if (nextStatus === "confirmed" && !parsed.data.externalReference) {
+      return reply.code(400).send({ error: "externalReference is required to confirm a booking" });
+    }
+
+    const resolved = await bookingWithAuthority(id);
+    if (!resolved) return notFound(reply);
+    const { booking, providerCompanyId } = resolved;
+
+    // Only the provider that owns the accepted quote, or platform staff, may decide.
+    const isProvider = providerCompanyId
+      ? await organizationOwnsCompany(user.organizationId, providerCompanyId)
+      : false;
+    if (!isProvider && !isPlatformStaff(user)) return forbidden(reply);
+
+    if (booking.status === "confirmed" || booking.status === "rejected" || booking.status === "cancelled") {
+      return reply.code(409).send({ error: `Booking is already ${booking.status}` });
+    }
+
     if (prisma) {
-      const booking = await (prisma as any).bookingRequest.findUnique({ where: { id } });
-      if (!booking) return notFound(reply);
-      if (booking.status === "confirmed") return reply.code(409).send({ error: "Booking already confirmed" });
-      const updated = await (prisma as any).bookingRequest.update({ where: { id }, data: { status: "confirmed", confirmedAt: new Date(), externalReference: parsed.data.externalReference } });
-      await recordAudit({ organizationId: booking.organizationId, actorUserId: user.id, action: "booking.confirm", entityType: "BookingRequest", entityId: id });
+      const updated = await (prisma as any).bookingRequest.update({
+        where: { id },
+        data: {
+          status: nextStatus,
+          confirmedAt: nextStatus === "confirmed" ? new Date() : null,
+          externalReference: nextStatus === "confirmed" ? parsed.data.externalReference : null
+        }
+      });
+      await recordAudit({
+        organizationId: booking.organizationId,
+        actorUserId: user.id,
+        action: `booking.${nextStatus}`,
+        entityType: "BookingRequest",
+        entityId: id,
+        metadata: { providerCompanyId, byPlatformStaff: !isProvider }
+      });
       return updated;
     }
 
-    const booking = devBookings.find((b) => b.id === id);
-    if (!booking) return notFound(reply);
-    if (booking.status === "confirmed") return reply.code(409).send({ error: "Booking already confirmed" });
-    booking.status = "confirmed";
-    booking.confirmedAt = new Date().toISOString();
-    booking.externalReference = parsed.data.externalReference;
-    booking.updatedAt = booking.confirmedAt;
-    await recordAudit({ organizationId: booking.organizationId, actorUserId: user.id, action: "booking.confirm", entityType: "BookingRequest", entityId: id });
+    booking.status = nextStatus;
+    booking.confirmedAt = nextStatus === "confirmed" ? new Date().toISOString() : undefined;
+    booking.externalReference = nextStatus === "confirmed" ? parsed.data.externalReference : undefined;
+    booking.updatedAt = new Date().toISOString();
+    await recordAudit({
+      organizationId: booking.organizationId,
+      actorUserId: user.id,
+      action: `booking.${nextStatus}`,
+      entityType: "BookingRequest",
+      entityId: id,
+      metadata: { providerCompanyId, byPlatformStaff: !isProvider }
+    });
     return { ...booking, devFallback: true };
+  }
+
+  app.post("/api/v1/bookings/:id/confirm", { onRequest: [app.authenticate] }, async (request, reply) =>
+    confirmOrRejectBooking(request, reply, "confirmed")
+  );
+
+  app.post("/api/v1/bookings/:id/reject", { onRequest: [app.authenticate] }, async (request, reply) =>
+    confirmOrRejectBooking(request, reply, "rejected")
+  );
+
+  /**
+   * Lists the bookings a caller may act on: the bookings requested by their own
+   * organization, plus any booking derived from a quote issued by a company they own.
+   * The viewer role is computed server-side and never taken from the client.
+   */
+  app.get("/api/v1/bookings", { onRequest: [app.authenticate] }, async (request) => {
+    const user = getAuthUser(request);
+    const staff = isPlatformStaff(user);
+
+    if (prisma) {
+      const companies = await (prisma as any).company.findMany({
+        where: { organizationId: user.organizationId },
+        select: { id: true }
+      });
+      const companyIds = companies.map((c: any) => c.id);
+      const providerQuoteIds = companyIds.length
+        ? (
+            await (prisma as any).quote.findMany({
+              where: { companyId: { in: companyIds } },
+              select: { id: true }
+            })
+          ).map((q: any) => q.id)
+        : [];
+
+      const items = await (prisma as any).bookingRequest.findMany({
+        where: staff
+          ? {}
+          : {
+              OR: [
+                { organizationId: user.organizationId },
+                ...(providerQuoteIds.length ? [{ quoteId: { in: providerQuoteIds } }] : [])
+              ]
+            },
+        include: { rfq: { include: { quotes: true } }, trackingEvents: true },
+        orderBy: { createdAt: "desc" },
+        take: 100
+      });
+
+      return {
+        items: items.map((booking: any) => {
+          const quote = (booking.rfq?.quotes ?? []).find((q: any) => q.id === booking.quoteId);
+          const isCustomer = booking.organizationId === user.organizationId;
+          const isProvider = Boolean(quote && companyIds.includes(quote.companyId));
+          return {
+            ...booking,
+            viewerRole: isProvider ? "provider" : isCustomer ? "customer" : "staff"
+          };
+        })
+      };
+    }
+
+    const mine = devCompanies.filter((c) => c.organizationId === user.organizationId).map((c) => c.id);
+    const myQuoteIds = devQuotesList.filter((q) => mine.includes(q.companyId)).map((q) => q.id);
+    const items = devBookings
+      .filter(
+        (b) =>
+          staff ||
+          b.organizationId === user.organizationId ||
+          Boolean(b.quoteId && myQuoteIds.includes(b.quoteId))
+      )
+      .map((b) => {
+        const quote = devQuotesList.find((q) => q.id === b.quoteId);
+        const isCustomer = b.organizationId === user.organizationId;
+        const isProvider = Boolean(quote && mine.includes(quote.companyId));
+        return {
+          ...b,
+          rfq: devRfqs.find((r) => r.id === b.rfqId) ?? null,
+          viewerRole: isProvider ? "provider" : isCustomer ? "customer" : "staff",
+          devFallback: true
+        };
+      });
+    return { items, devFallback: true };
+  });
+
+  app.get("/api/v1/bookings/:id", { onRequest: [app.authenticate] }, async (request, reply) => {
+    const user = getAuthUser(request);
+    const { id } = request.params as { id: string };
+    const resolved = await bookingWithAuthority(id);
+    if (!resolved) return notFound(reply);
+    const { booking, providerCompanyId } = resolved;
+    const isCustomer = booking.organizationId === user.organizationId;
+    const isProvider = providerCompanyId
+      ? await organizationOwnsCompany(user.organizationId, providerCompanyId)
+      : false;
+    if (!isCustomer && !isProvider && !isPlatformStaff(user)) return forbidden(reply);
+    return { ...booking, viewerRole: isCustomer ? "customer" : isProvider ? "provider" : "staff" };
   });
 
   app.post("/api/v1/bookings/:id/tracking", { onRequest: [app.authenticate] }, async (request, reply) => {
     const user = getAuthUser(request);
     const { id } = request.params as { id: string };
-    const parsed = z.object({ code: z.string().min(1), label: z.string().min(1) }).safeParse(request.body);
+    const parsed = z.object({ code: z.string().min(1), label: z.string().min(1), note: z.string().optional() }).safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "Invalid input", issues: parsed.error.issues });
 
+    const resolved = await bookingWithAuthority(id);
+    if (!resolved) return notFound(reply);
+    const { booking, providerCompanyId } = resolved;
+    const isCustomer = booking.organizationId === user.organizationId;
+    const isProvider = providerCompanyId
+      ? await organizationOwnsCompany(user.organizationId, providerCompanyId)
+      : false;
+    if (!isCustomer && !isProvider && !isPlatformStaff(user)) return forbidden(reply);
+
+    // Manual operational updates are always labelled with their source so they are
+    // never confused with trusted carrier or integration tracking events.
+    const source = isProvider ? "manual-provider" : isCustomer ? "manual-customer" : "manual-staff";
+
     if (prisma) {
-      const booking = await (prisma as any).bookingRequest.findUnique({ where: { id } });
-      if (!booking || booking.organizationId !== user.organizationId) return notFound(reply);
-      const event = await (prisma as any).trackingEvent.create({ data: { bookingRequestId: id, ...parsed.data, source: "manual" } });
+      const event = await (prisma as any).trackingEvent.create({
+        data: { bookingRequestId: id, code: parsed.data.code, label: parsed.data.label, source }
+      });
       return event;
     }
-    const booking = devBookings.find((b) => b.id === id && b.organizationId === user.organizationId);
-    if (!booking) return notFound(reply);
-    const event = { id: `dev-te-${booking.trackingEvents.length + 1}`, ...parsed.data, source: "manual", occurredAt: new Date().toISOString() };
-    booking.trackingEvents.push(event);
+    const devBooking = devBookings.find((b) => b.id === id);
+    if (!devBooking) return notFound(reply);
+    const event = {
+      id: `dev-te-${devBooking.trackingEvents.length + 1}`,
+      ...parsed.data,
+      source,
+      occurredAt: new Date().toISOString()
+    };
+    devBooking.trackingEvents.push(event);
     return { ...event, devFallback: true };
   });
 }

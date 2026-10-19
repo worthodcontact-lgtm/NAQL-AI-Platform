@@ -63,10 +63,36 @@ describe("authorization and tenant isolation", () => {
     expect(quoteRes.statusCode).toBe(200);
     const quoteId = JSON.parse(quoteRes.payload).id;
 
-    const offerRes = await app.inject({
+    // The requesting customer must NOT be able to write an offer onto its own request.
+    const selfOffer = await app.inject({
       method: "POST", url: `/api/v1/quotations/${quoteId}/offers`,
       headers: { authorization: `Bearer ${token}` },
       payload: { providerId: "provider-1", currency: "USD", amount: 1200, transitDays: 14, validityUntil: new Date(Date.now() + 86400000).toISOString() }
+    });
+    expect(selfOffer.statusCode).toBe(403);
+
+    // A provider organization that actually owns the company submits the offer.
+    const providerToken = await register(`qp-${Date.now()}@example.com`);
+    const companyRes = await app.inject({
+      method: "POST", url: "/api/v1/companies/register",
+      headers: { authorization: `Bearer ${providerToken}` },
+      payload: { name: `Legacy Provider ${Date.now()}`, type: "forwarder", country: "EG" }
+    });
+    expect(companyRes.statusCode).toBe(200);
+    const companyId = JSON.parse(companyRes.payload).id;
+
+    // The provider cannot forge an offer under a company it does not own.
+    const forgedOffer = await app.inject({
+      method: "POST", url: `/api/v1/quotations/${quoteId}/offers`,
+      headers: { authorization: `Bearer ${providerToken}` },
+      payload: { providerId: "someone-elses-company", currency: "USD", amount: 1, transitDays: 1, validityUntil: new Date(Date.now() + 86400000).toISOString() }
+    });
+    expect(forgedOffer.statusCode).toBe(403);
+
+    const offerRes = await app.inject({
+      method: "POST", url: `/api/v1/quotations/${quoteId}/offers`,
+      headers: { authorization: `Bearer ${providerToken}` },
+      payload: { providerId: companyId, currency: "USD", amount: 1200, transitDays: 14, validityUntil: new Date(Date.now() + 86400000).toISOString() }
     });
     expect(offerRes.statusCode).toBe(200);
     const offerId = JSON.parse(offerRes.payload).id;

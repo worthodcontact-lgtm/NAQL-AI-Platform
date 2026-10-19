@@ -40,7 +40,10 @@ model Membership {
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt      DateTime     @default(now())
 
-  @@unique([organizationId, userId])
+  /// A user may hold several roles in one organization (e.g. REVIEWER + DATA_OPERATOR).
+  /// The same role cannot be granted twice for the same membership pair.
+  @@unique([organizationId, userId, role])
+  @@index([userId])
 }
 
 model Port {
@@ -50,8 +53,18 @@ model Port {
   country   String
   latitude  Float
   longitude Float
+  /// seaport | airport | inland | border
+  type      String     @default("seaport")
+  /// Human-readable source of the reference record.
+  source    String?
+  /// approximate | verified | unverified — never claim more than is known.
+  verificationStatus String @default("approximate")
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
   shipmentsFrom Shipment[] @relation("OriginPort")
   shipmentsTo   Shipment[] @relation("DestinationPort")
+
+  @@index([country, type])
 }
 
 model Shipment {
@@ -75,6 +88,9 @@ model Shipment {
   documents         Document[]
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
+
+  @@index([organizationId, createdAt])
+  @@index([status])
 }
 
 model ShipmentMilestone {
@@ -153,6 +169,10 @@ model Company {
   reviews            VerificationReview[]
   rfqRecipients      RfqRecipient[]
   quotes             Quote[]
+
+  @@index([organizationId])
+  @@index([listed, type])
+  @@index([verificationStatus])
 }
 
 model CompanyService {
@@ -202,6 +222,9 @@ model Rfq {
   updatedAt         DateTime       @updatedAt
   recipients        RfqRecipient[]
   quotes            Quote[]
+  bookings          BookingRequest[]
+
+  @@index([organizationId, createdAt])
 }
 
 model RfqRecipient {
@@ -230,6 +253,10 @@ model Quote {
   status         String     @default("submitted")
   createdAt      DateTime   @default(now())
   items          QuoteItem[]
+  bookings       BookingRequest[]
+
+  @@index([organizationId, createdAt])
+  @@index([companyId])
 }
 
 model QuoteItem {
@@ -245,15 +272,22 @@ model QuoteItem {
 model BookingRequest {
   id                String          @id @default(cuid())
   rfqId             String?
-  quoteId           String?
+  rfq               Rfq?            @relation(fields: [rfqId], references: [id], onDelete: SetNull)
+  /// A booking is always derived from exactly one accepted quote.
+  quoteId           String?         @unique
+  quote             Quote?          @relation(fields: [quoteId], references: [id], onDelete: SetNull)
   organizationId    String
   createdByUserId   String
   status            String          @default("requested")
   confirmedAt       DateTime?
   externalReference String?
+  rejectionReason   String?
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
   trackingEvents    TrackingEvent[]
+
+  @@index([organizationId, createdAt])
+  @@index([status])
 }
 
 model TrackingEvent {

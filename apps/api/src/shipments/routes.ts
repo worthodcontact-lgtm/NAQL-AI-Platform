@@ -64,6 +64,10 @@ export async function registerShipmentRoutes(app: FastifyInstance) {
     if (prisma) {
       const items = await (prisma as any).shipment.findMany({
         where: { organizationId: user.organizationId },
+        include: {
+          originPort: { select: { code: true, name: true, country: true } },
+          destinationPort: { select: { code: true, name: true, country: true } }
+        },
         orderBy: { createdAt: "desc" },
         take: 100
       });
@@ -76,7 +80,13 @@ export async function registerShipmentRoutes(app: FastifyInstance) {
     const user = getAuthUser(request);
     const { id } = request.params as { id: string };
     if (prisma) {
-      const shipment = await (prisma as any).shipment.findUnique({ where: { id } });
+      const shipment = await (prisma as any).shipment.findUnique({
+        where: { id },
+        include: {
+          originPort: { select: { code: true, name: true, country: true } },
+          destinationPort: { select: { code: true, name: true, country: true } }
+        }
+      });
       if (!shipment || shipment.organizationId !== user.organizationId) return notFound(reply);
       return shipment;
     }
@@ -93,17 +103,31 @@ export async function registerShipmentRoutes(app: FastifyInstance) {
     const input = parsed.data;
 
     if (prisma) {
-      if (await (prisma as any).port.findUnique({ where: { id: input.originPortId } }) === null ||
-          await (prisma as any).port.findUnique({ where: { id: input.destinationPortId } }) === null) {
-        return reply.code(400).send({ error: "Unknown port", issues: [{ message: "originPortId or destinationPortId does not exist" }] });
+      // Ports may be referenced by their stable code (e.g. "ALY") or by their database id.
+      // The seeded reference data is code-identified, so codes are the natural client input.
+      const resolvePort = async (value: string) => {
+        const byCode = await (prisma as any).port.findUnique({ where: { code: value } });
+        if (byCode) return byCode.id as string;
+        const byId = await (prisma as any).port.findUnique({ where: { id: value } });
+        return byId ? (byId.id as string) : null;
+      };
+
+      const originPortId = await resolvePort(input.originPortId);
+      const destinationPortId = await resolvePort(input.destinationPortId);
+      if (!originPortId || !destinationPortId) {
+        return reply.code(400).send({
+          error: "Unknown port",
+          issues: [{ message: "originPortId or destinationPortId is neither a known port code nor a known port id" }]
+        });
       }
+
       const shipment = await (prisma as any).shipment.create({
         data: {
           reference: `SHP-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           organizationId: user.organizationId,
           createdByUserId: user.id,
-          originPortId: input.originPortId,
-          destinationPortId: input.destinationPortId,
+          originPortId,
+          destinationPortId,
           mode: input.mode,
           incoterm: input.incoterm,
           cargoDescription: input.cargoDescription,

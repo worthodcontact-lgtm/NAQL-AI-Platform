@@ -106,7 +106,33 @@ describe("RFQ, quote, and booking workflow", () => {
     expect(acceptRes.statusCode).toBe(200);
     const booking = JSON.parse(acceptRes.payload);
     expect(booking.status).toBe("requested");
-    expect(booking.confirmedAt).toBeUndefined();
+    // `null` in database mode, `undefined` in the in-memory fallback: both mean unconfirmed.
+    expect(booking.confirmedAt ?? null).toBeNull();
+
+    // The customer who accepted the quote must NOT be able to confirm their own booking.
+    const selfConfirm = await app.inject({
+      method: "POST", url: `/api/v1/bookings/${booking.id}/confirm`,
+      headers: { authorization: `Bearer ${customer}` },
+      payload: { externalReference: "SELF-1" }
+    });
+    expect(selfConfirm.statusCode).toBe(403);
+
+    // Nor may an unrelated authenticated user confirm it.
+    const stranger = await register(`stranger-${Date.now()}@example.com`);
+    const strangerConfirm = await app.inject({
+      method: "POST", url: `/api/v1/bookings/${booking.id}/confirm`,
+      headers: { authorization: `Bearer ${stranger}` },
+      payload: { externalReference: "STRANGER-1" }
+    });
+    expect(strangerConfirm.statusCode).toBe(403);
+
+    // Confirmation without an external reference is rejected.
+    const missingRef = await app.inject({
+      method: "POST", url: `/api/v1/bookings/${booking.id}/confirm`,
+      headers: { authorization: `Bearer ${provider}` },
+      payload: {}
+    });
+    expect(missingRef.statusCode).toBe(400);
 
     const confirmRes = await app.inject({
       method: "POST", url: `/api/v1/bookings/${booking.id}/confirm`,
@@ -115,6 +141,54 @@ describe("RFQ, quote, and booking workflow", () => {
     });
     expect(confirmRes.statusCode).toBe(200);
     expect(JSON.parse(confirmRes.payload).status).toBe("confirmed");
+
+    // A confirmed booking cannot be confirmed again.
+    const doubleConfirm = await app.inject({
+      method: "POST", url: `/api/v1/bookings/${booking.id}/confirm`,
+      headers: { authorization: `Bearer ${provider}` },
+      payload: { externalReference: "EXT-456" }
+    });
+    expect(doubleConfirm.statusCode).toBe(409);
+  });
+
+  it("lets the provider reject a booking request and records the outcome", async () => {
+    const customer = await register(`rej-customer-${Date.now()}@example.com`);
+    const provider = await register(`rej-provider-${Date.now()}@example.com`);
+    const companyRes = await app.inject({
+      method: "POST", url: "/api/v1/companies/register",
+      headers: { authorization: `Bearer ${provider}` },
+      payload: { name: `Reject Co ${Date.now()}`, type: "forwarder", country: "EG" }
+    });
+    const companyId = JSON.parse(companyRes.payload).id;
+
+    const rfqRes = await app.inject({
+      method: "POST", url: "/api/v1/rfqs",
+      headers: { authorization: `Bearer ${customer}` },
+      payload: { origin: "ALX", destination: "IST", mode: "SEA", cargoDescription: "cotton", weightKg: 900, recipientCompanyIds: [companyId] }
+    });
+    const rfqId = JSON.parse(rfqRes.payload).id;
+
+    const quoteRes = await app.inject({
+      method: "POST", url: `/api/v1/rfqs/${rfqId}/quotes`,
+      headers: { authorization: `Bearer ${provider}` },
+      payload: { companyId, currency: "USD", transitDays: 9, validityUntil: new Date(Date.now() + 5 * 86400000).toISOString(), items: [{ label: "Freight", amount: 800, currency: "USD" }] }
+    });
+    const quote = JSON.parse(quoteRes.payload);
+
+    const acceptRes = await app.inject({
+      method: "POST", url: `/api/v1/rfqs/${rfqId}/accept`,
+      headers: { authorization: `Bearer ${customer}` },
+      payload: { quoteId: quote.id }
+    });
+    const bookingId = JSON.parse(acceptRes.payload).id;
+
+    const rejectRes = await app.inject({
+      method: "POST", url: `/api/v1/bookings/${bookingId}/reject`,
+      headers: { authorization: `Bearer ${provider}` },
+      payload: { reason: "No capacity" }
+    });
+    expect(rejectRes.statusCode).toBe(200);
+    expect(JSON.parse(rejectRes.payload).status).toBe("rejected");
   });
 
   it("enforces tenant isolation on RFQs", async () => {

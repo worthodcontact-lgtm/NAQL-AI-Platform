@@ -79,15 +79,22 @@ export async function registerQuotationRoutes(app: FastifyInstance) {
     const parsed = offerSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "Invalid input", issues: parsed.error.issues });
 
+    // An offer must come from a provider organization that actually owns the company.
+    // The requesting customer must never be able to write offers onto its own request.
+    const { organizationOwnsCompany } = await import("../companies/ownership.js");
+    if (!(await organizationOwnsCompany(user.organizationId, parsed.data.providerId))) {
+      return forbidden(reply);
+    }
+
     if (prisma) {
       const quote = await (prisma as any).quotationRequest.findUnique({ where: { id } });
-      if (!quote || quote.organizationId !== user.organizationId) return notFound(reply);
+      if (!quote) return notFound(reply);
       if (quote.status === "closed" || quote.status === "awarded") return reply.code(409).send({ error: "Quotation is not open" });
       const offer = await (prisma as any).quotationOffer.create({ data: { quotationRequestId: id, ...parsed.data, validityUntil: new Date(parsed.data.validityUntil) } });
       return offer;
     }
 
-    const quote = devQuotes.find((q) => q.id === id && q.organizationId === user.organizationId);
+    const quote = devQuotes.find((q) => q.id === id);
     if (!quote) return notFound(reply);
     if (quote.status === "closed" || quote.status === "awarded") return reply.code(409).send({ error: "Quotation is not open" });
     const offer: DevOffer = { id: `dev-o-${quote.offers.length + 1}`, quotationRequestId: id, providerId: parsed.data.providerId, currency: parsed.data.currency, amount: parsed.data.amount, transitDays: parsed.data.transitDays, validityUntil: parsed.data.validityUntil };

@@ -2,9 +2,18 @@ node_modules/
 dist/
 .next/
 .next-verify/
+.pgdata/
 .env
+.env.local
+.env.*.local
 *.log
 __pycache__/
 .venv/
 pnpm-debug.log*
 .turbo/
+*.tsbuildinfo
+# Local secrets must never be committed.
+apikey.txt
+*.pem
+*.key
+

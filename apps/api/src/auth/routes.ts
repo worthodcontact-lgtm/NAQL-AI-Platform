@@ -27,6 +27,38 @@ type DevUser = {
 
 const devUsers = new Map<string, DevUser>();
 
+/**
+ * Development-only role hints.
+ *
+ * These let a developer exercise reviewer/admin flows locally. They are honoured
+ * ONLY when NODE_ENV !== "production"; in production roles always come from
+ * organization membership records, and this function must not be consulted.
+ */
+function resolveDevRoles(
+  email: string,
+  accountType?: "customer" | "company" | "reviewer" | "admin"
+): string[] {
+  const inferred =
+    accountType ??
+    (email.startsWith("admin")
+      ? "admin"
+      : email.startsWith("reviewer") || email.startsWith("operator")
+        ? "reviewer"
+        : "customer");
+
+  if (inferred === "admin") return ["SUPER_ADMIN"];
+  if (inferred === "reviewer") return ["REVIEWER", "DATA_OPERATOR"];
+  return ["ORG_ADMIN"];
+}
+
+function registrationRoles(
+  email: string,
+  accountType?: "customer" | "company" | "reviewer" | "admin"
+): string[] {
+  if (process.env.NODE_ENV === "production") return ["ORG_ADMIN"];
+  return resolveDevRoles(email, accountType);
+}
+
 export interface AuthUser {
   id: string;
   email: string;
@@ -67,8 +99,10 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     if (!parsed.success) return reply.code(400).send({ error: "Invalid input", issues: parsed.error.issues });
     const { email, password, displayName, organizationName } = parsed.data;
 
-    if (prisma) {      const existing = await (prisma as any).user.findUnique({ where: { email } });
+    if (prisma) {
+      const existing = await (prisma as any).user.findUnique({ where: { email } });
       if (existing) return reply.code(409).send({ error: "User already exists" });
+      const roles = registrationRoles(email, parsed.data.accountType);
       const org = await (prisma as any).organization.create({
         data: { name: organizationName ?? `${displayName}'s Organization`, slug: `${slugify(organizationName ?? displayName)}-${Date.now()}` }
       });
@@ -76,30 +110,20 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       const user = await (prisma as any).user.create({
         data: { email, passwordHash, displayName, organizationId: org.id }
       });
-      await (prisma as any).membership.create({ data: { organizationId: org.id, userId: user.id, role: "ORG_ADMIN" } });
-      const token = app.jwt.sign({ sub: user.id, email: user.email, displayName: user.displayName, organizationId: org.id, roles: ["ORG_ADMIN"], dev: false });
-      return { token, user: { id: user.id, email: user.email, displayName: user.displayName, organizationId: org.id, roles: ["ORG_ADMIN"] } };
+      // One membership row per role so a reviewer can later be revoked independently.
+      await (prisma as any).membership.createMany({
+        data: roles.map((role) => ({ organizationId: org.id, userId: user.id, role }))
+      });
+      const token = app.jwt.sign({ sub: user.id, email: user.email, displayName: user.displayName, organizationId: org.id, roles, dev: false });
+      return { token, user: { id: user.id, email: user.email, displayName: user.displayName, organizationId: org.id, roles } };
     }
 
     if (devUsers.has(email)) return reply.code(409).send({ error: "User already exists" });
     const orgId = `dev-org-${devUsers.size + 1}`;
     const passwordHash = await bcrypt.hash(password, 10);
     // Development-only role hints so local flows (reviewer/admin) can be exercised
-    // without a database. An explicit accountType is honored only outside production.
-    const hint = process.env.NODE_ENV !== "production" ? parsed.data.accountType : undefined;
-    const inferred =
-      hint ??
-      (email.startsWith("admin")
-        ? "admin"
-        : email.startsWith("reviewer") || email.startsWith("operator")
-          ? "reviewer"
-          : "customer");
-    const devRoles =
-      inferred === "admin"
-        ? ["SUPER_ADMIN"]
-        : inferred === "reviewer"
-          ? ["REVIEWER", "DATA_OPERATOR"]
-          : ["ORG_ADMIN"];
+    // without a database. Never applied when NODE_ENV=production.
+    const devRoles = registrationRoles(email, parsed.data.accountType);
     const user: DevUser = { id: `dev-user-${devUsers.size + 1}`, email, passwordHash, displayName, organizationId: orgId, roles: devRoles };
     devUsers.set(email, user);
     const token = app.jwt.sign({ sub: user.id, email: user.email, displayName: user.displayName, organizationId: user.organizationId, roles: user.roles, dev: true });

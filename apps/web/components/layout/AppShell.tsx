@@ -10,11 +10,14 @@ import {
   describeRoles,
   isPlatformStaffRole
 } from "@/lib/auth";
+import PersistenceBanner from "@/components/layout/PersistenceBanner";
 
 const nav = [
   { href: "/dashboard", label: "لوحة التحكم" },
   { href: "/shipments", label: "الشحنات" },
   { href: "/rfqs", label: "طلبات العروض" },
+  { href: "/provider/rfqs", label: "صندوق الطلبات" },
+  { href: "/bookings", label: "الحجوزات" },
   { href: "/quotations", label: "العروض" },
   { href: "/costs", label: "حساب التكلفة" },
   { href: "/documents", label: "الوثائق" },
@@ -99,6 +102,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
+        <PersistenceBanner />
         <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/90 backdrop-blur">
           <div className="flex items-center justify-between gap-3 px-5 py-3">
             <div className="min-w-0">
