@@ -305,3 +305,61 @@ Both keys are valid and active. The response contained the standard Comtrade fie
 **Important:** no application code reads these variables yet. They are inert until the
 trade-data integration is implemented. AI endpoints remain unconfigured and still return
 `providerAvailable: false`.
+
+## 10. External trade data — UN Comtrade integration (2026-10-19)
+
+### 10.1 What was built
+
+- `apps/api/src/trade/comtrade.ts` — server-only client. Key is sent as the
+  `Ocp-Apim-Subscription-Key` **header**, never in the URL. 30-minute in-process cache
+  (64 entries), in-flight de-duplication, 12 s timeout, primary→secondary key rotation
+  on 401/403.
+- `apps/api/src/trade/routes.ts` — `GET /api/v1/trade/status` and
+  `GET /api/v1/trade/overview`, both authenticated, the overview capped at 20 req/min.
+- `apps/web/app/(app)/trade/page.tsx` — Arabic RTL page with reporter/year/flow
+  selectors, totals, top partners, top HS chapters, five-year series, provenance badge
+  and fetch timestamp.
+- `apps/web/lib/api.ts` — `ApiError` now carries the API `code` so the UI can show the
+  correct failure reason.
+
+### 10.2 Upstream behaviour discovered while wiring it
+
+Five **parallel** requests to Comtrade were rejected as a burst: only the first
+succeeded and the rest failed. The calls are now serialized with a 120 ms gap. Verified
+after the change: `partial=false` and all five sections populated.
+
+### 10.3 Live verification through the browser
+
+`http://localhost:3000/trade`, reporter Egypt (818), default year 2025, imports:
+
+```text
+imports        $101,003,754,652   (CIF)
+exports        $51,393,000,000+   (FOB)
+balance        $49,610,000,000+
+top partners   China 18.6%, USA 12.6%, Saudi Arabia 9.4%, Russia 5.1%, Germany 4.3%
+top chapters   27 Mineral fuels 21.4%, 84 Machinery 8%, 10 Cereals 6.7%
+series         2021 89.21B, 2022 96.19B, 2023 84.22B, 2024 94.7B, 2025 101B
+provenance     UN Comtrade / comtradeapi.un.org
+```
+
+### 10.4 Automated tests
+
+`apps/api/src/__tests__/trade.test.ts` — 8 tests:
+
+1. unauthenticated access → 401 for both routes;
+2. status reports configuration without calling upstream;
+3. no key → `503 not_configured`, no fabricated data;
+4. totals/rankings/shares/series derived correctly; World excluded; key never appears in a URL;
+5. second identical request served from cache (5 upstream calls total for two requests);
+6. primary key rejected → secondary key used → 200;
+7. upstream 429 → `503 rate_limited` with `retryAfterSeconds`;
+8. invalid query → 400.
+
+Full API suite: **27 passed / 5 files**. Web typecheck: pass. Web production build:
+compiled successfully, 21 static pages, `/trade` present (6.41 kB).
+
+### 10.5 Not done
+
+- Trade data is not persisted; each process restart re-fetches from Comtrade.
+- Only the top 10 rows and a five-year window are exposed.
+- No historical archive, no HS-level drill-down, no CSV export.

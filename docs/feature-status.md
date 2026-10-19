@@ -93,6 +93,22 @@ command whose result is recorded in `docs/verification-log.md`.
 
 Nothing in this section may be described as working until a provider is configured.
 
+## External trade data (UN Comtrade)
+
+| Feature | Status | Evidence / gap |
+|---|---|---|
+| Subscription key storage | Done | `COMTRADE_API_KEY` + secondary in the git-ignored root `.env`; never sent to the browser |
+| `GET /api/v1/trade/status` | Done | authenticated; reports configuration only, never the key |
+| `GET /api/v1/trade/overview` | Done | totals, top partners, top HS chapters, five-year series; 8 automated tests |
+| Live provider verification | Done | both keys returned HTTP 200 for Egypt 2023 |
+| Response cache | Done | 30 minutes, 64 entries, in-process; verified second request makes no upstream call |
+| Key rotation | Done | secondary key tried when the primary is rejected (401/403) |
+| Honest failure modes | Done | `503 not_configured`, `503 rate_limited`, `502 upstream_error`, `504 timeout`; no fabricated rows |
+| Sequential upstream calls | Done | parallel calls triggered upstream burst rejection; now serialized with a 120 ms gap |
+| UI `/trade` | Done | Arabic RTL, provenance badge and fetch timestamp, explicit error card |
+| Trade data persisted locally | Missing | fetched live and cached in memory only; lost on restart (re-fetched) |
+| Full commodity detail / historical archive | Missing | only top 10 and a five-year window |
+
 ## Platform
 
 | Feature | Status | Evidence / gap |

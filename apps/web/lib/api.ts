@@ -19,10 +19,12 @@ export function clearToken() {
 export class ApiError extends Error {
   status: number;
   issues?: unknown;
-  constructor(message: string, status = 0, issues?: unknown) {
+  code?: string;
+  constructor(message: string, status = 0, issues?: unknown, code?: string) {
     super(message);
     this.status = status;
     this.issues = issues;
+    this.code = code;
   }
 }
 
@@ -48,7 +50,7 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
 
   if (!res.ok) {
     const message = json?.error ?? `Request failed (${res.status})`;
-    throw new ApiError(message, res.status, json?.issues);
+    throw new ApiError(message, res.status, json?.issues, json?.code);
   }
   return json;
 }

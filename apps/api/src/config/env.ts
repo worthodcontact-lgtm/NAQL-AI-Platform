@@ -48,7 +48,16 @@ const envSchema = z.object({
   CORS_ORIGINS: z.string().optional(),
   /** Absolute or relative directory for local file storage. */
   STORAGE_PATH: z.string().optional(),
-  LOG_LEVEL: z.string().default("info")
+  LOG_LEVEL: z.string().default("info"),
+  /**
+   * UN Comtrade subscription keys (Azure APIM format). Server-side only: they are
+   * never exposed to the browser. The secondary key is used for rotation when the
+   * primary is rejected.
+   */
+  COMTRADE_API_KEY: z.string().optional(),
+  COMTRADE_API_KEY_SECONDARY: z.string().optional(),
+  COMTRADE_API_BASE_URL: z.string().default("https://comtradeapi.un.org"),
+  COMTRADE_REQUEST_TIMEOUT_MS: z.string().default("12000")
 });
 
 export const env = envSchema.parse(process.env);

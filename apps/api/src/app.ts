@@ -15,6 +15,7 @@ import { registerAIRoutes } from "./ai/routes.js";
 import { registerCompanyRoutes } from "./companies/routes.js";
 import { registerRfqRoutes } from "./rfq/routes.js";
 import { registerAdminRoutes } from "./admin/routes.js";
+import { registerTradeRoutes } from "./trade/routes.js";
 
 /**
  * Recursively convert Prisma `Decimal` values to plain numbers and `Date` values to
@@ -102,6 +103,7 @@ export async function buildApp() {
   await registerCompanyRoutes(app);
   await registerRfqRoutes(app);
   await registerAdminRoutes(app);
+  await registerTradeRoutes(app);
 
   return app;
 }

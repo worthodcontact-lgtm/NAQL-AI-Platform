@@ -20,6 +20,7 @@ const nav = [
   { href: "/bookings", label: "الحجوزات" },
   { href: "/quotations", label: "العروض" },
   { href: "/costs", label: "حساب التكلفة" },
+  { href: "/trade", label: "التجارة الخارجية" },
   { href: "/documents", label: "الوثائق" },
   { href: "/ai", label: "المساعد الذكي" },
   { href: "/directory", label: "دليل الشركات" },
