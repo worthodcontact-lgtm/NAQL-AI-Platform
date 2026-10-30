@@ -27,7 +27,7 @@ interface CompanyDetail {
     createdAt: string;
     updatedAt: string;
     services: { id: string; mode: string; originLocation: string | null; destinationLocation: string | null; notes: string | null }[];
-    documents: { id: string; type: string; filename: string; status: string; reviewNote: string | null; uploadedAt: string }[];
+    documents?: { id: string; type: string; filename: string; status: string; reviewNote: string | null; uploadedAt: string }[];
     reviews: { id: string; reviewerUserId: string; decision: string; notes: string | null; createdAt: string }[];
   };
   organization: {
@@ -46,14 +46,38 @@ export default function AdminCompanyDetailPage() {
   const { data, loading, error, reload } = useAdminResource<CompanyDetail>(id ? `/api/v1/admin/companies/${id}` : null);
 
   const [open, setOpen] = useState(false);
-  const [decision, setDecision] = useState("approved");
+  const [decision, setDecision] = useState("needs_information");
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
+  const [documentReason, setDocumentReason] = useState("");
+  const [documents, setDocuments] = useState<CompanyDetail["company"]["documents"]>(undefined);
+  const [documentError, setDocumentError] = useState("");
+  const [documentLoading, setDocumentLoading] = useState(false);
 
   const company = data?.company;
   const ownCompany = Boolean(company?.organizationId && company.organizationId === currentUser?.organizationId);
   const canVerify = has("companies.verify") && !ownCompany;
+  const canReadDocuments = has("companies.documents.read");
+
+  async function loadCompanyDocuments() {
+    if (!company || documentReason.trim().length < 5) {
+      setDocumentError("اكتب سبباً واضحاً (5 أحرف على الأقل) قبل طلب الوصول.");
+      return;
+    }
+    setDocumentLoading(true);
+    setDocumentError("");
+    try {
+      const result = await adminFetch(
+        `/api/v1/admin/companies/${company.id}/documents?reason=${encodeURIComponent(documentReason.trim())}`
+      );
+      setDocuments(result.company.documents ?? []);
+    } catch (caught: any) {
+      setDocumentError(caught?.message ?? "تعذّر تحميل الوثائق.");
+    } finally {
+      setDocumentLoading(false);
+    }
+  }
 
   async function submitDecision() {
     if (!company) return;
@@ -91,7 +115,7 @@ export default function AdminCompanyDetailPage() {
               <button
                 onClick={() => {
                   setOpen(true);
-                  setDecision("approved");
+                  setDecision("needs_information");
                   setNotes("");
                   setDialogError(null);
                 }}
@@ -178,26 +202,62 @@ export default function AdminCompanyDetailPage() {
 
             <section className="rounded-2xl border border-slate-200 bg-white shadow-panel">
               <div className="border-b border-slate-200 px-5 py-4">
-                <h3 className="text-sm font-bold text-navy">الوثائق</h3>
-                <p className="mt-1 text-xs text-slate-500">بيانات وصفية فقط؛ لا تُعرض مسارات التخزين</p>
+                <h3 className="text-sm font-bold text-navy">وثائق التحقق</h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  وصول استثنائي يتطلب صلاحية مخصصة وسبباً مسجلاً. لا تُعرض لأدوار الدعم العادية.
+                </p>
               </div>
-              {data.company.documents.length === 0 ? (
-                <p className="px-5 py-6 text-sm text-slate-500">لا توجد وثائق مرفوعة.</p>
-              ) : (
-                <ul className="divide-y divide-slate-100">
-                  {data.company.documents.map((document) => (
-                    <li key={document.id} className="flex items-center justify-between gap-3 px-5 py-3 text-sm">
-                      <div>
-                        <p className="font-medium text-slate-700">{document.filename}</p>
-                        <p className="mt-0.5 text-xs text-slate-500">
-                          {document.type} · {formatDate(document.uploadedAt)}
-                        </p>
-                      </div>
-                      <StatusBadge value={document.status} />
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <div className="space-y-3 px-5 py-4">
+                {canReadDocuments ? (
+                  <>
+                    <div className="flex flex-wrap items-end gap-2">
+                      <label className="flex-1 text-xs font-medium text-slate-600">
+                        سبب الوصول
+                        <input
+                          className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                          value={documentReason}
+                          placeholder="مثال: مراجعة تحقق الشركة بعد استلام المستندات"
+                          onChange={(event) => setDocumentReason(event.target.value)}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="rounded-lg bg-navy px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                        onClick={() => void loadCompanyDocuments()}
+                        disabled={documentLoading}
+                      >
+                        {documentLoading ? "جارٍ التحميل..." : "طلب الوصول المسجل"}
+                      </button>
+                    </div>
+                    {documentError ? <p className="text-xs text-error">{documentError}</p> : null}
+                    {documents ? (
+                      documents.length === 0 ? (
+                        <p className="text-sm text-slate-500">لا توجد وثائق مرفوعة.</p>
+                      ) : (
+                        <ul className="divide-y divide-slate-100 rounded-lg border border-slate-200">
+                          {documents.map((document) => (
+                            <li key={document.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
+                              <div>
+                                <p className="font-medium text-slate-700">{document.filename}</p>
+                                <p className="mt-0.5 text-xs text-slate-500">
+                                  {document.type} · {formatDate(document.uploadedAt)}
+                                </p>
+                              </div>
+                              <StatusBadge value={document.status} />
+                            </li>
+                          ))}
+                        </ul>
+                      )
+                    ) : (
+                      <p className="text-sm text-slate-500">لم يتم طلب الوصول بعد.</p>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-sm text-slate-500">
+                    حسابك لا يملك صلاحية الوصول إلى وثائق التحقق. استخدم مسار المراجعة الرسمي.
+                  </p>
+                )}
+              </div>
             </section>
           </div>
 
@@ -286,10 +346,14 @@ export default function AdminCompanyDetailPage() {
               onChange={(event) => setDecision(event.target.value)}
               className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
             >
-              <option value="approved">اعتماد (موثّق)</option>
+              <option value="approved">اعتماد (يتطلب وثيقة مخزنة موثوقة)</option>
               <option value="needs_information">طلب معلومات إضافية</option>
               <option value="rejected">رفض</option>
             </select>
+            <span className="block text-xs font-normal text-amber-800">
+              الاعتماد مرفوض تلقائياً حتى يتوفر رفع وثائق آمن ومخزّن. اسم الملف أو storageKey
+              ليس دليلاً على وجود مستند؛ استخدم «طلب معلومات إضافية» حالياً.
+            </span>
           </label>
           <label className="block space-y-1 text-sm">
             <span className="font-medium text-slate-600">

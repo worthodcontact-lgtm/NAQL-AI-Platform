@@ -21,6 +21,7 @@ export const PERMISSIONS = [
   "users.roles",
   "companies.read",
   "companies.verify",
+  "companies.documents.read",
   "shipments.read",
   "shipments.manage",
   "bookings.read",
@@ -32,7 +33,12 @@ export const PERMISSIONS = [
   "reports.read",
   "audit.read",
   "settings.read",
-  "settings.manage"
+  "settings.manage",
+  /**
+   * Exceptional access to commercial document metadata. Never granted as part of
+   * routine support work; every access must record a reason and hit the audit log.
+   */
+  "documents.read_sensitive"
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -68,6 +74,7 @@ const MATRIX: Record<PlatformRole, readonly Permission[]> = {
     "users.read",
     "companies.read",
     "companies.verify",
+    "companies.documents.read",
     "reports.read",
     "audit.read",
     "settings.read"

@@ -6,6 +6,7 @@ import { getAuthUser } from "../auth/routes.js";
 import { can } from "../auth/roles.js";
 import { listAudit } from "../audit/log.js";
 import { recordAudit } from "../audit/log.js";
+import { getIntegrationRegistry } from "../integrations/registry.js";
 import {
   AdminActionError,
   listQuerySchema,
@@ -61,6 +62,11 @@ const settingsUpdateSchema = z
   .refine((value) => Object.keys(value).length > 0, "At least one setting is required");
 
 export async function registerAdminSystemRoutes(app: FastifyInstance) {
+  // This endpoint intentionally exposes capability status and sanitized evidence only.
+  app.get("/api/v1/admin/integrations", { onRequest: [app.authenticate], preHandler: requirePermission("metrics.read") }, async () => {
+    return getIntegrationRegistry();
+  });
+
   // ---------------------------------------------------------------- overview
   app.get("/api/v1/admin/overview", { onRequest: [app.authenticate], preHandler: requirePermission("metrics.read") }, async (request, reply) => {
     const db = prisma!;

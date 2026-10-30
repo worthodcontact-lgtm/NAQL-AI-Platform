@@ -13,7 +13,10 @@
     "COMTRADE_API_KEY",
     "COMTRADE_API_KEY_SECONDARY",
     "NEXT_PUBLIC_API_URL",
-    "NEXT_DIST_DIR"
+    "NEXT_DIST_DIR",
+    "NAQL_ALLOW_REMOTE_DB_TESTS",
+    "NAQL_DISABLE_ENV_FILE",
+    "NAQL_BACKUP_DIR"
   ],
   "tasks": {
     "build": {

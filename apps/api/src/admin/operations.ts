@@ -1,6 +1,9 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db.js";
+import { getAuthUser } from "../auth/routes.js";
+import { can } from "../auth/roles.js";
+import { recordAudit } from "../audit/log.js";
 import { listQuerySchema, pageResult, pagination, parseDate, requirePermission, sendError } from "./shared.js";
 
 const dateParam = z
@@ -104,6 +107,13 @@ export async function registerAdminOperationRoutes(app: FastifyInstance) {
 
   app.get("/api/v1/admin/shipments/:id", { onRequest: [app.authenticate], preHandler: requirePermission("shipments.read") }, async (request, reply) => {
     const { id } = request.params as { id: string };
+    const actor = getAuthUser(request);
+    /**
+     * Commercial document metadata is not part of routine shipment support.
+     * It requires the dedicated `documents.read_sensitive` permission and a
+     * recorded reason on `/api/v1/admin/shipments/:id/documents`.
+     */
+    const includeQuotations = can(actor, "quotations.read");
     const shipment = await db().shipment.findUnique({
       where: { id },
       select: {
@@ -123,24 +133,82 @@ export async function registerAdminOperationRoutes(app: FastifyInstance) {
         originPort: true,
         destinationPort: true,
         milestones: { orderBy: { occurredAt: "asc" } },
-        documents: {
-          select: { id: true, type: true, filename: true, status: true, validation: true, uploadedAt: true },
-          orderBy: { uploadedAt: "desc" }
-        },
-        quotationRequests: {
-          select: {
-            id: true,
-            status: true,
-            requestedAt: true,
-            offers: { select: { id: true, providerId: true, currency: true, amount: true, transitDays: true, validityUntil: true } }
-          },
-          orderBy: { requestedAt: "desc" }
-        }
+        ...(includeQuotations
+          ? {
+              quotationRequests: {
+                select: {
+                  id: true,
+                  status: true,
+                  requestedAt: true,
+                  offers: { select: { id: true, providerId: true, currency: true, amount: true, transitDays: true, validityUntil: true } }
+                },
+                orderBy: { requestedAt: "desc" as const }
+              }
+            }
+          : {})
       }
     });
     if (!shipment) return sendError(reply, 404, "shipment_not_found", "Shipment not found");
     return { shipment };
   });
+
+  /**
+   * Exceptional access to shipment document metadata.
+   *
+   * This is deliberately separate from the ordinary shipment detail. The caller
+   * must hold the explicit permission and supply a documented reason; the access
+   * itself is written to the audit log.
+   */
+  app.get(
+    "/api/v1/admin/shipments/:id/documents",
+    { onRequest: [app.authenticate], preHandler: requirePermission("documents.read_sensitive") },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const parsed = z.object({ reason: z.string().trim().min(5).max(500) }).safeParse(request.query);
+      if (!parsed.success) {
+        return sendError(reply, 400, "reason_required", "A documented reason is required", {
+          issues: parsed.error.issues
+        });
+      }
+      const actor = getAuthUser(request);
+      const shipment = await db().shipment.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          reference: true,
+          organizationId: true,
+          organization: { select: { id: true, name: true } },
+          documents: {
+            select: {
+              id: true,
+              type: true,
+              filename: true,
+              visibility: true,
+              status: true,
+              validation: true,
+              uploadedAt: true
+            },
+            orderBy: { uploadedAt: "desc" }
+          }
+        }
+      });
+      if (!shipment) return sendError(reply, 404, "shipment_not_found", "Shipment not found");
+
+      await recordAudit({
+        organizationId: shipment.organizationId,
+        actorUserId: actor.id,
+        actorRole: actor.platformRole,
+        action: "admin.shipment.documents.accessed",
+        entityType: "Shipment",
+        entityId: id,
+        outcome: "success",
+        requestId: request.id,
+        metadata: { reason: parsed.data.reason, documentCount: shipment.documents.length }
+      });
+
+      return { shipment };
+    }
+  );
 
   // ------------------------------------------------------------------ bookings
   app.get("/api/v1/admin/bookings", { onRequest: [app.authenticate], preHandler: requirePermission("bookings.read") }, async (request, reply) => {

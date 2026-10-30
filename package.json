@@ -12,11 +12,16 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "test:isolated": "pnpm --filter @naql/api run test:isolated",
     "db:generate": "pnpm --filter @naql/api run prisma:generate",
     "db:migrate": "pnpm --filter @naql/api run prisma:migrate",
     "db:deploy": "pnpm --filter @naql/api run prisma:deploy",
     "db:status": "pnpm --filter @naql/api run db:status",
-    "db:seed": "pnpm --filter @naql/api run prisma:seed"
+    "db:seed": "pnpm --filter @naql/api run prisma:seed",
+    "db:seed:demo": "pnpm --filter @naql/api run db:seed:demo",
+    "db:seed:demo:remove": "pnpm --filter @naql/api run db:seed:demo:remove",
+    "db:backup": "pnpm --filter @naql/api run db:backup",
+    "db:restore": "pnpm --filter @naql/api run db:restore"
   },
   "devDependencies": {
     "turbo": "^2.3.0",

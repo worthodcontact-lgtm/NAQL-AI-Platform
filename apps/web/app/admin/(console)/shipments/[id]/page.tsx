@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 import { useParams } from "next/navigation";
+import { useAdminAuth } from "@/components/admin/AdminAuthProvider";
 import { AdminPageHeader, ErrorPanel, LoadingPanel, StatusBadge } from "@/components/admin/ui";
-import { formatDate, formatMoney, formatNumber } from "@/lib/admin";
+import { adminFetch, formatDate, formatMoney, formatNumber } from "@/lib/admin";
 import { useAdminResource } from "@/lib/useAdminResource";
 
 interface ShipmentDetail {
@@ -24,8 +26,8 @@ interface ShipmentDetail {
     originPort: { id: string; code: string; name: string; country: string; type: string } | null;
     destinationPort: { id: string; code: string; name: string; country: string; type: string } | null;
     milestones: { id: string; code: string; label: string; status: string; occurredAt: string | null }[];
-    documents: { id: string; type: string; filename: string; status: string; validation: string | null; uploadedAt: string }[];
-    quotationRequests: {
+    documents?: { id: string; type: string; filename: string; visibility?: string; status: string; validation: string | null; uploadedAt: string }[];
+    quotationRequests?: {
       id: string;
       status: string;
       requestedAt: string;
@@ -37,7 +39,33 @@ interface ShipmentDetail {
 export default function AdminShipmentDetailPage() {
   const params = useParams<{ id: string }>();
   const id = String(params?.id ?? "");
+  const { has } = useAdminAuth();
   const { data, loading, error, reload } = useAdminResource<ShipmentDetail>(id ? `/api/v1/admin/shipments/${id}` : null);
+  const [reason, setReason] = useState("");
+  const [documents, setDocuments] = useState<ShipmentDetail["shipment"]["documents"]>(undefined);
+  const [documentError, setDocumentError] = useState("");
+  const [documentLoading, setDocumentLoading] = useState(false);
+  const canReadSensitiveDocuments = has("documents.read_sensitive");
+  const quotationRequests = data?.shipment.quotationRequests;
+
+  async function loadDocuments() {
+    if (!id || reason.trim().length < 5) {
+      setDocumentError("اكتب سبباً واضحاً (5 أحرف على الأقل) قبل طلب الوصول.");
+      return;
+    }
+    setDocumentLoading(true);
+    setDocumentError("");
+    try {
+      const result = await adminFetch(
+        `/api/v1/admin/shipments/${id}/documents?reason=${encodeURIComponent(reason.trim())}`
+      );
+      setDocuments(result.shipment.documents ?? []);
+    } catch (err) {
+      setDocumentError(err instanceof Error ? err.message : "تعذر تحميل المستندات.");
+    } finally {
+      setDocumentLoading(false);
+    }
+  }
 
   return (
     <div>
@@ -128,25 +156,62 @@ export default function AdminShipmentDetailPage() {
 
             <section className="rounded-2xl border border-slate-200 bg-white shadow-panel">
               <div className="border-b border-slate-200 px-5 py-4">
-                <h3 className="text-sm font-bold text-navy">الوثائق</h3>
+                <h3 className="text-sm font-bold text-navy">الوثائق التجارية</h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  لا تُعرض تلقائياً. الوصول الاستثنائي يتطلب صلاحية محددة وسبباً مسجلاً في سجل التدقيق.
+                </p>
               </div>
-              {data.shipment.documents.length === 0 ? (
-                <p className="px-5 py-6 text-sm text-slate-500">لا توجد وثائق.</p>
-              ) : (
-                <ul className="divide-y divide-slate-100">
-                  {data.shipment.documents.map((document) => (
-                    <li key={document.id} className="flex items-center justify-between gap-3 px-5 py-3 text-sm">
-                      <div>
-                        <p className="font-medium text-slate-700">{document.filename}</p>
-                        <p className="mt-0.5 text-xs text-slate-500">
-                          {document.type} · {formatDate(document.uploadedAt)}
-                        </p>
-                      </div>
-                      <StatusBadge value={document.status} />
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <div className="space-y-3 px-5 py-4">
+                {canReadSensitiveDocuments ? (
+                  <>
+                    <div className="flex flex-wrap items-end gap-2">
+                      <label className="flex-1 text-xs font-medium text-slate-600">
+                        سبب الوصول
+                        <input
+                          className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                          value={reason}
+                          placeholder="مثال: تحقيق في نزاع مستندي بتذكرة دعم رقم ..."
+                          onChange={(event) => setReason(event.target.value)}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="rounded-lg bg-navy px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                        onClick={() => void loadDocuments()}
+                        disabled={documentLoading}
+                      >
+                        {documentLoading ? "جارٍ التحميل..." : "طلب الوصول المسجل"}
+                      </button>
+                    </div>
+                    {documentError ? <p className="text-xs text-error">{documentError}</p> : null}
+                    {documents ? (
+                      documents.length === 0 ? (
+                        <p className="text-sm text-slate-500">لا توجد وثائق مسجلة لهذه الشحنة.</p>
+                      ) : (
+                        <ul className="divide-y divide-slate-100 rounded-lg border border-slate-200">
+                          {documents.map((document) => (
+                            <li key={document.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
+                              <div>
+                                <p className="font-medium text-slate-700">{document.filename}</p>
+                                <p className="mt-0.5 text-xs text-slate-500">
+                                  {document.type} · {document.visibility === "private" ? "خاصة" : "مشتركة"} · {formatDate(document.uploadedAt)}
+                                </p>
+                              </div>
+                              <StatusBadge value={document.status} />
+                            </li>
+                          ))}
+                        </ul>
+                      )
+                    ) : (
+                      <p className="text-sm text-slate-500">لم يتم طلب الوصول بعد.</p>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-sm text-slate-500">
+                    حسابك لا يملك صلاحية الوصول إلى المستندات التجارية. استخدم مسار الدعم الرسمي عند الحاجة.
+                  </p>
+                )}
+              </div>
             </section>
           </div>
 
@@ -155,11 +220,13 @@ export default function AdminShipmentDetailPage() {
               <h3 className="text-sm font-bold text-navy">طلبات عروض مرتبطة</h3>
               <p className="mt-1 text-xs text-slate-500">العروض المرتبطة بالشحنة، دون تعديل</p>
             </div>
-            {data.shipment.quotationRequests.length === 0 ? (
+            {quotationRequests === undefined ? (
+              <p className="px-5 py-6 text-sm text-slate-500">طلب العروض غير متاح لدورك الحالي.</p>
+            ) : quotationRequests.length === 0 ? (
               <p className="px-5 py-6 text-sm text-slate-500">لا توجد طلبات عروض.</p>
             ) : (
               <ul className="divide-y divide-slate-100">
-                {data.shipment.quotationRequests.map((request) => (
+                {quotationRequests.map((request) => (
                   <li key={request.id} className="px-5 py-4">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="text-sm font-medium text-slate-700">طلب {request.id}</span>

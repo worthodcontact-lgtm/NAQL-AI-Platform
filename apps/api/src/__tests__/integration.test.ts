@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { buildApp } from "../app.js";
+import { prisma } from "../db.js";
 
 let app: any;
 
@@ -17,6 +18,8 @@ async function register(email: string) {
   expect(res.statusCode).toBe(200);
   return JSON.parse(res.payload).token as string;
 }
+
+const PDF_BYTES = Buffer.from("%PDF-1.4\n%%EOF");
 
 describe("authorization and tenant isolation", () => {
   it("requires authentication", async () => {
@@ -81,6 +84,22 @@ describe("authorization and tenant isolation", () => {
     expect(companyRes.statusCode).toBe(200);
     const companyId = JSON.parse(companyRes.payload).id;
 
+    // Per-shipment collaboration: the provider must be an invited party with the
+    // quote flag. Knowing the quotation id alone is not enough.
+    if (prisma) {
+      const partyRes = await app.inject({
+        method: "POST",
+        url: `/api/v1/shipments/${shipmentId}/parties`,
+        headers: { authorization: `Bearer ${token}` },
+        payload: {
+          companyId,
+          partyRole: "FREIGHT_FORWARDER",
+          permissions: { canView: true, canQuote: true, canViewFinancials: true }
+        }
+      });
+      expect(partyRes.statusCode).toBe(200);
+    }
+
     // The provider cannot forge an offer under a company it does not own.
     const forgedOffer = await app.inject({
       method: "POST", url: `/api/v1/quotations/${quoteId}/offers`,
@@ -117,7 +136,32 @@ describe("authorization and tenant isolation", () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it("stores and retrieves document metadata with availability honesty", async () => {
+  it("marks incomplete landed cost inputs unknown and rejects mixed currencies", async () => {
+    const email = `lc-incomplete-${Date.now()}@example.com`;
+    const token = await register(email);
+    const incomplete = await app.inject({
+      method: "POST", url: "/api/v1/costs/landed-cost",
+      headers: { authorization: `Bearer ${token}` },
+      payload: { productCost: 1000, freight: 200, currency: "USD" }
+    });
+    expect(incomplete.statusCode).toBe(200);
+    const assessment = JSON.parse(incomplete.payload);
+    expect(assessment.status).toBe("incomplete");
+    expect(assessment.total).toBeNull();
+    expect(assessment.provenance.fees.inclusion).toBe("unknown");
+
+    const mismatch = await app.inject({
+      method: "POST", url: "/api/v1/costs/landed-cost",
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        productCost: 1000, freight: 200, insurance: 30, customsDutyRate: 0.05,
+        taxRate: 0.15, fees: 20, currency: "USD", componentCurrencies: { freight: "EGP" }
+      }
+    });
+    expect(mismatch.statusCode).toBe(400);
+  });
+
+  it.skipIf(!prisma)("processes a text invoice through the real deterministic extractor", async () => {
     const email = `d-${Date.now()}@example.com`;
     const token = await register(email);
     const created = await app.inject({
@@ -127,20 +171,86 @@ describe("authorization and tenant isolation", () => {
     });
     const shipmentId = JSON.parse(created.payload).id;
 
+    const invoice = [
+      "Commercial Invoice",
+      "Invoice No: INV-100",
+      "Date: 2026-10-01",
+      "Currency: USD",
+      "Total: 100.00"
+    ].join("\n");
     const upload = await app.inject({
       method: "POST", url: `/api/v1/shipments/${shipmentId}/documents`,
       headers: { authorization: `Bearer ${token}` },
-      payload: { type: "invoice", filename: "invoice.pdf", contentType: "application/pdf", size: 4 }
+      payload: {
+        type: "invoice",
+        filename: "invoice.txt",
+        contentType: "text/plain",
+        size: Buffer.byteLength(invoice),
+        dataBase64: Buffer.from(invoice).toString("base64")
+      }
     });
     expect(upload.statusCode).toBe(200);
     const docId = JSON.parse(upload.payload).id;
+    expect(JSON.parse(upload.payload).storageKey).toBeUndefined();
 
-    const validation = await app.inject({
-      method: "POST", url: `/api/v1/documents/${docId}/validate`,
+    const processing = await app.inject({
+      method: "POST", url: `/api/v1/documents/${docId}/process`,
       headers: { authorization: `Bearer ${token}` }
     });
-    const body = JSON.parse(validation.payload);
-    expect(body.aiAvailable).toBe(false);
+    expect(processing.statusCode).toBe(200);
+    const body = JSON.parse(processing.payload);
+    expect(body.status).toBe("completed");
+    expect(body.documentType).toBe("commercial_invoice");
+    expect(body.malwareScanStatus).toBe("not_scanned");
+    expect(body.fields.some((field: any) => field.key === "invoice_number" && field.value === "INV-100")).toBe(true);
+
+    const extraction = await app.inject({
+      method: "GET", url: `/api/v1/documents/${docId}/extraction`,
+      headers: { authorization: `Bearer ${token}` }
+    });
+    expect(extraction.statusCode).toBe(200);
+    expect(JSON.parse(extraction.payload).fields.length).toBeGreaterThan(0);
+  });
+
+  it("rejects path traversal in document filenames before storage is touched", async () => {
+    const email = `doc-path-${Date.now()}@example.com`;
+    const token = await register(email);
+    const created = await app.inject({
+      method: "POST", url: "/api/v1/shipments",
+      headers: { authorization: `Bearer ${token}` },
+      payload: { originPortId: "JED", destinationPortId: "RUH", mode: "SEA", incoterm: "FOB", cargoDescription: "path test", weightKg: 100 }
+    });
+    const shipmentId = JSON.parse(created.payload).id;
+
+    for (const filename of ["../escape.pdf", "..\\escape.pdf", "/etc/passwd", "C:\\Windows\\win.ini", "folder/invoice.pdf"]) {
+      const res = await app.inject({
+        method: "POST", url: `/api/v1/shipments/${shipmentId}/documents`,
+        headers: { authorization: `Bearer ${token}` },
+        payload: {
+          type: "invoice",
+          filename,
+          contentType: "application/pdf",
+          size: 3,
+          dataBase64: Buffer.from("abc").toString("base64")
+        }
+      });
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.payload).code).toBe("invalid_filename");
+    }
+
+    const valid = await app.inject({
+      method: "POST", url: `/api/v1/shipments/${shipmentId}/documents`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        type: "invoice",
+        filename: "invoice.pdf",
+        contentType: "application/pdf",
+        size: PDF_BYTES.length,
+        dataBase64: PDF_BYTES.toString("base64")
+      }
+    });
+    expect(valid.statusCode).toBe(200);
+    expect(JSON.parse(valid.payload).storageKey).toBeUndefined();
   });
 
   it("returns AI copilot fallback when provider unavailable", async () => {

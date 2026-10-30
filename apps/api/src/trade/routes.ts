@@ -1,6 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { TradeError, comtradeConfigured, getTradeOverview } from "./comtrade.js";
+import { TradeError, comtradeHasSubscriptionKey, comtradeProviderStatus, comtradeProviderStatusMessage, getTradeOverview } from "./comtrade.js";
 
 const querySchema = z.object({
   /** UN M49 numeric reporter code. 818 = Egypt. */
@@ -12,16 +12,19 @@ const querySchema = z.object({
 
 export async function registerTradeRoutes(app: FastifyInstance) {
   /**
-   * Configuration probe. Does not call the upstream service, so it is safe to poll.
-   * It reports whether a key exists — never the key itself.
+   * Provider selection probe. Does not call the upstream service, so it is safe to poll.
+   * It reports entitlement tier only — never a key or its value.
    */
   app.get("/api/v1/trade/status", { onRequest: [app.authenticate] }, async () => ({
-    configured: comtradeConfigured(),
+    configured: true,
+    status: comtradeProviderStatus(),
+    subscriptionKeyConfigured: comtradeHasSubscriptionKey(),
     source: "UN Comtrade",
     upstream: "comtradeapi.un.org",
-    message: comtradeConfigured()
-      ? "Trade data provider is configured."
-      : "Trade data provider is not configured. Set COMTRADE_API_KEY in the server environment."
+    ...(comtradeProviderStatusMessage() ? { explanation: comtradeProviderStatusMessage() } : {}),
+    message: comtradeHasSubscriptionKey()
+      ? "UN Comtrade subscription API will be used."
+      : "UN Comtrade public preview API will be used; no subscription key is required."
   }));
 
   /**

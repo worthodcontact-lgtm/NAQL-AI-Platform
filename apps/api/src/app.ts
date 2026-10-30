@@ -3,7 +3,7 @@ import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import jwt from "@fastify/jwt";
 import { randomUUID } from "node:crypto";
-import { corsOrigins, env } from "./config/env.js";
+import { corsOrigins, env, RATE_LIMIT_MAX } from "./config/env.js";
 import { databaseReachable, persistenceMode, prisma } from "./db.js";
 import { registerAuthRoutes } from "./auth/routes.js";
 import { loadPrincipal } from "./auth/principal.js";
@@ -13,10 +13,15 @@ import { registerQuotationRoutes } from "./quotations/routes.js";
 import { registerPortRoutes } from "./ports/routes.js";
 import { registerDocumentRoutes } from "./documents/routes.js";
 import { registerAIRoutes } from "./ai/routes.js";
+import { registerIntelligenceRoutes } from "./intelligence/routes.js";
 import { registerCompanyRoutes } from "./companies/routes.js";
+import { registerCompanyWorkspaceRoutes } from "./company/routes.js";
 import { registerRfqRoutes } from "./rfq/routes.js";
 import { registerAdminRoutes } from "./admin/routes.js";
+import { getIntegrationRegistry } from "./integrations/registry.js";
 import { registerTradeRoutes } from "./trade/routes.js";
+import { registerShipmentEventRoutes } from "./shipments/events.js";
+import { registerNotificationRoutes } from "./notifications/routes.js";
 
 /**
  * Recursively convert Prisma `Decimal` values to plain numbers and `Date` values to
@@ -52,6 +57,9 @@ export async function buildApp() {
   const isTest = env.NODE_ENV === "test";
 
   const app = Fastify({
+    // Document uploads are limited to 2 MB after base64 decoding. Base64 adds
+    // roughly 33% plus JSON overhead, so the transport limit must be larger.
+    bodyLimit: 4 * 1024 * 1024,
     logger: isTest
       ? false
       : {
@@ -72,7 +80,7 @@ export async function buildApp() {
 
   await app.register(cors, { origin: corsOrigins(), credentials: true });
   await app.register(rateLimit, {
-    max: 100,
+    max: RATE_LIMIT_MAX,
     timeWindow: "1 minute",
     // Keep the error shape consistent with the rest of the API so the Arabic UI
     // can map `rate_limited` instead of displaying an English framework message.
@@ -139,6 +147,8 @@ export async function buildApp() {
       displayName: principal.displayName,
       organizationId: principal.organizationId,
       roles: principal.roles,
+      accountType: principal.accountType,
+      tradeRole: principal.tradeRole,
       platformRole: principal.platformRole,
       status: principal.status,
       scope: raw?.scope === "admin" ? "admin" : "app"
@@ -205,13 +215,38 @@ export async function buildApp() {
   }));
 
   /** Readiness: dependencies are actually usable. */
-  app.get("/ready", async (_request, reply) => {
+  app.get("/ready", async (request, reply) => {
     const database = await databaseReachable();
     const ready = persistenceMode === "database" ? database : true;
+    const query = request.query as { detailed?: string };
+    let dependencies: Array<{
+      id: string;
+      status: string;
+      configuration: string;
+      connectivity: string;
+      operation: string;
+      capabilities: string[];
+    }> | undefined;
+    if (query.detailed === "1") {
+      const registry = await getIntegrationRegistry();
+      // Detailed readiness intentionally exposes only operational state, never
+      // provider credentials, evidence text, or provider error bodies.
+      dependencies = registry.items
+        .filter((item) => ["database", "ai", "pdf-ocr", "object-storage", "email"].includes(item.id))
+        .map((item) => ({
+          id: item.id,
+          status: item.status,
+          configuration: item.configuration,
+          connectivity: item.connectivity,
+          operation: item.operation,
+          capabilities: item.capabilities
+        }));
+    }
     return reply.code(ready ? 200 : 503).send({
       ready,
       persistenceMode,
-      database: persistenceMode === "database" ? (database ? "connected" : "unreachable") : "not-configured"
+      database: persistenceMode === "database" ? (database ? "connected" : "unreachable") : "not-configured",
+      ...(dependencies ? { dependencies } : {})
     });
   });
 
@@ -222,10 +257,14 @@ export async function buildApp() {
   await registerPortRoutes(app);
   await registerDocumentRoutes(app);
   await registerAIRoutes(app);
+  await registerIntelligenceRoutes(app);
   await registerCompanyRoutes(app);
+  await registerCompanyWorkspaceRoutes(app);
   await registerRfqRoutes(app);
   await registerAdminRoutes(app);
   await registerTradeRoutes(app);
+  await registerShipmentEventRoutes(app);
+  await registerNotificationRoutes(app);
 
   return app;
 }

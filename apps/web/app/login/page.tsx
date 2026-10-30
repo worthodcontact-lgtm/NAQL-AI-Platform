@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { useAuth } from "@/components/providers/AuthProvider";
+import { ThemeToggle } from "@/components/ui/ThemeToggle";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -52,7 +53,7 @@ export default function LoginPage() {
   return (
     <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center p-6">
       <Card className="p-6">
-        <p className="text-xs font-semibold tracking-widest text-teal">NAQL AI</p>
+        <div className="mb-3 flex items-center justify-between"><p className="text-xs font-semibold tracking-widest text-teal">NAQL AI</p><ThemeToggle /></div>
         <h1 className="mt-1 text-2xl font-bold text-navy">تسجيل الدخول</h1>
         <p className="mt-1 text-sm text-slate-500">
           نقطة دخول واحدة لكل أنواع الحسابات. البوابة تُحدَّد تلقائيًا من صلاحياتك.

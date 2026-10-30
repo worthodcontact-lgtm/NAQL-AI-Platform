@@ -5,19 +5,36 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
 }
 
 model Organization {
   id          String       @id @default(cuid())
   name        String
   slug        String       @unique
+  /// customer | provider. This is an account classification, never a role or
+  /// platform authority. Existing organizations were backfilled by migration.
+  accountType String       @default("customer")
+  /// importer | exporter | both for the organization's own trade activity.
+  /// Null for legacy/general customers and for providers that do not trade.
+  tradeRole   String?
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
   users       User[]
   memberships Membership[]
+  invitations CompanyInvitation[]
   shipments   Shipment[]
   quotationRequests QuotationRequest[]
+  documentExtractions DocumentExtraction[]
+  documentFindings    DocumentFinding[]
+  aiExecutions        AiExecution[]
+  copilotConversations CopilotConversation[]
+  riskAssessments     ShipmentRiskAssessment[]
+  delayEstimates      ShipmentDelayEstimate[]
+  shipmentEvents      ShipmentEvent[]
+  notifications       Notification[]
+  rfqDocuments        RfqDocument[]
+
+  @@index([accountType])
 }
 
 model User {
@@ -28,6 +45,9 @@ model User {
   organizationId String?
   organization   Organization? @relation(fields: [organizationId], references: [id])
   memberships    Membership[]
+  sentMembershipInvites Membership[] @relation("MembershipInviter")
+  sentCompanyInvitations CompanyInvitation[] @relation("CompanyInvitationInviter")
+  acceptedCompanyInvitations CompanyInvitation[] @relation("CompanyInvitationAcceptor")
   /// active | suspended — a suspended account cannot authenticate or use any token.
   status         String       @default("active")
   /// SUPER_ADMIN | ADMIN | REVIEWER | SUPPORT. Null for ordinary users.
@@ -39,25 +59,72 @@ model User {
   lastLoginAt    DateTime?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
+  aiExecutions   AiExecution[]
+  copilotConversations CopilotConversation[]
+  notifications  Notification[]
 
   @@index([platformRole])
   @@index([status])
   @@index([createdAt])
 }
 
+/// Company membership for the organization workspace.
+///
+/// This is the `CompanyMembership` entity required by the access-control model.
+/// It is deliberately mapped to the existing `Membership` table instead of
+/// creating a duplicate table: every business record is already scoped by
+/// `organizationId`, and `Organization` is the company workspace.
 model Membership {
   id             String       @id @default(cuid())
   organizationId String
   userId         String
+  /// COMPANY_OWNER | COMPANY_ADMIN | OPERATIONS_MANAGER | LOGISTICS_OPERATOR |
+  /// FINANCE_USER | DOCUMENTS_USER | VIEWER. Legacy roles (ORG_ADMIN,
+  /// COMPANY_MANAGER, OWNER) remain valid and are mapped by the API.
   role           String
+  /// active | invited | suspended. Only active memberships produce a principal.
+  status         String       @default("active")
+  invitedByUserId String?
+  invitedBy      User?        @relation("MembershipInviter", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+  acceptedAt     DateTime?
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt @default(now())
 
   /// A user may hold several roles in one organization (e.g. REVIEWER + DATA_OPERATOR).
   /// The same role cannot be granted twice for the same membership pair.
   @@unique([organizationId, userId, role])
-  @@index([userId])
+  @@index([userId, status])
+  @@index([organizationId, status])
+}
+
+/// Invitation for an email address that does not have an account yet.
+///
+/// Existing users are invited by creating an `invited` Membership row. This
+/// table only carries the one-time registration token for a new account.
+model CompanyInvitation {
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  email           String
+  /// Company role to grant after acceptance.
+  role            String
+  /// SHA-256 of the one-time token. The raw token is returned only once.
+  tokenHash       String       @unique
+  /// pending | accepted | revoked | expired
+  status          String       @default("pending")
+  invitedByUserId String
+  invitedBy       User         @relation("CompanyInvitationInviter", fields: [invitedByUserId], references: [id], onDelete: Cascade)
+  acceptedByUserId String?
+  acceptedBy      User?        @relation("CompanyInvitationAcceptor", fields: [acceptedByUserId], references: [id], onDelete: SetNull)
+  expiresAt       DateTime
+  acceptedAt      DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@index([organizationId, email, status])
+  @@index([status, expiresAt])
 }
 
 model Port {
@@ -77,6 +144,8 @@ model Port {
   updatedAt DateTime   @updatedAt
   shipmentsFrom Shipment[] @relation("OriginPort")
   shipmentsTo   Shipment[] @relation("DestinationPort")
+  rfqsFrom Rfq[] @relation("RfqOriginPort")
+  rfqsTo   Rfq[] @relation("RfqDestinationPort")
 
   @@index([country, type])
 }
@@ -100,6 +169,13 @@ model Shipment {
   milestones        ShipmentMilestone[]
   quotationRequests QuotationRequest[]
   documents         Document[]
+  parties           ShipmentParty[]
+  findings          DocumentFinding[]
+  riskAssessments   ShipmentRiskAssessment[]
+  delayEstimates    ShipmentDelayEstimate[]
+  events            ShipmentEvent[]
+  bookings          BookingRequest[]
+  rfq               Rfq?
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
 
@@ -125,6 +201,11 @@ model QuotationRequest {
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   status         String         @default("open")
   requestedAt    DateTime       @default(now())
+  /// Set once. A request can have at most one awarded offer.
+  awardedOfferId String?        @unique
+  awardedAt      DateTime?
+  awardedByUserId String?
+  closedAt       DateTime?
   offers         QuotationOffer[]
 }
 
@@ -137,6 +218,14 @@ model QuotationOffer {
   amount              Decimal
   transitDays         Int
   validityUntil       DateTime
+  /// submitted | awarded | rejected | withdrawn | expired
+  status              String           @default("submitted")
+  decidedAt           DateTime?
+  decidedByUserId     String?
+  rejectionReason     String?
+  withdrawnAt         DateTime?
+
+  @@index([quotationRequestId, status])
 }
 
 model Document {
@@ -146,9 +235,236 @@ model Document {
   type        String
   filename    String
   storageKey  String
+  /// Declared MIME type from the upload; content signatures are verified separately.
+  contentType String?
+  /// Size in bytes when known. Nullable for rows created before Phase 2.
+  size        Int?
+  /// SHA-256 of the stored bytes. Nullable for legacy rows.
+  contentHash String?
+  /// not_scanned | clean | pending | infected | scan_unavailable | scan_failed
+  malwareScanStatus String @default("not_scanned")
+  malwareScanDetail Json?
+  /// Set when the configured retention policy expires the document.
+  retentionUntil DateTime?
+  deletedAt   DateTime?
+  /// shipment = visible to the owner and to parties with canViewDocuments.
+  /// private  = visible only to the uploader organization and the shipment owner.
+  visibility  String   @default("shipment")
+  uploadedByUserId String?
+  uploadedByOrganizationId String?
   status      String   @default("uploaded")
+  /// Legacy unstructured validation payload. New code uses DocumentExtraction
+  /// and DocumentFinding instead.
   validation  String?
   uploadedAt  DateTime @default(now())
+  extraction  DocumentExtraction?
+  findings    DocumentFinding[]
+
+  @@index([shipmentId, visibility])
+  @@index([uploadedByOrganizationId])
+  @@index([deletedAt, retentionUntil])
+}
+
+/// The latest processing result for a document. A document has at most one
+/// current extraction; history is retained in AiExecution and audit logs.
+model DocumentExtraction {
+  id                  String    @id @default(cuid())
+  documentId          String    @unique
+  document            Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  organizationId      String
+  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// queued | processing | completed | failed | unavailable
+  status              String    @default("queued")
+  /// commercial_invoice | packing_list | bill_of_lading | certificate_of_origin |
+  /// shipping_instructions | customs_document | other
+  documentType        String?
+  classificationMethod String?
+  /// deterministic-text-v1 | ai-provider | pdf-text | ocr
+  extractionMethod    String?
+  /// not_required | available | OCR_UNAVAILABLE | EXTRACTION_UNAVAILABLE
+  ocrStatus           String    @default("not_required")
+  /// not_scanned | scanned | scan_unavailable | scan_failed
+  malwareScanStatus   String    @default("not_scanned")
+  provider            String?
+  model               String?
+  /// Untrusted text from the document, bounded before persistence.
+  extractedText       String?
+  /// Structured fields with per-field provenance.
+  fields              Json?
+  warnings            Json?
+  errorCode           String?
+  errorMessage        String?
+  /// Current processing claim. Used to stop concurrent runs from writing
+  /// duplicate results; only the holder can persist a result.
+  processingRunId     String?
+  processingStartedAt DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  findings            DocumentFinding[]
+
+  @@index([organizationId, createdAt])
+  @@index([status])
+  @@index([documentType])
+  @@index([processingStartedAt])
+}
+
+/// A deterministic cross-document or document-to-shipment finding. Findings are
+/// not customs or legal determinations; they always require human review for
+/// critical/error severities.
+model DocumentFinding {
+  id                  String    @id @default(cuid())
+  documentId          String
+  document            Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  extractionId        String?
+  extraction          DocumentExtraction? @relation(fields: [extractionId], references: [id], onDelete: SetNull)
+  organizationId      String
+  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  shipmentId          String
+  shipment            Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  code                String
+  /// INFO | WARNING | ERROR | CRITICAL
+  severity            String
+  field               String?
+  observed            Json?
+  expected            Json?
+  message             String
+  suggestedAction     String?
+  requiresReview      Boolean   @default(true)
+  sourceDocumentIds   Json?
+  createdAt           DateTime  @default(now())
+
+  @@index([shipmentId, severity])
+  @@index([documentId])
+  @@index([organizationId, createdAt])
+  @@index([code])
+}
+
+/// Provider execution metadata for operational visibility. Never contains
+/// prompts, document text, API keys, or model output.
+model AiExecution {
+  id             String    @id @default(cuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  userId         String?
+  user           User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  operation      String
+  provider       String
+  model          String?
+  /// completed | unavailable | timeout | failure | validation_failed
+  status         String
+  latencyMs      Int?
+  inputTokens    Int?
+  outputTokens   Int?
+  costUsd        Decimal?  @db.Decimal(12, 6)
+  errorCode      String?
+  createdAt      DateTime  @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([operation, status])
+}
+
+model CopilotConversation {
+  id             String    @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  messages       CopilotMessage[]
+
+  @@index([organizationId, userId, updatedAt])
+}
+
+model CopilotMessage {
+  id               String    @id @default(cuid())
+  conversationId   String
+  conversation     CopilotConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  /// user | assistant
+  role             String
+  content          String
+  /// completed | degraded | unavailable | error
+  status           String    @default("completed")
+  /// Source references only; never raw private records from another tenant.
+  sources          Json?
+  suggestedActions Json?
+  warnings         Json?
+  createdAt        DateTime  @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+model ShipmentRiskAssessment {
+  id               String    @id @default(cuid())
+  shipmentId       String
+  shipment         Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  score            Int
+  /// low | medium | high | critical
+  category         String
+  method           String
+  ruleVersion      String
+  dataCompleteness Int
+  factors          Json
+  recommendations  Json
+  createdAt        DateTime  @default(now())
+
+  @@index([shipmentId, createdAt])
+  @@index([organizationId, createdAt])
+}
+
+model ShipmentDelayEstimate {
+  id               String    @id @default(cuid())
+  shipmentId       String
+  shipment         Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// insufficient_data | estimated | observed
+  status           String
+  estimatedDelayDays Float?
+  minDelayDays     Float?
+  maxDelayDays     Float?
+  riskCategory     String
+  method           String
+  ruleVersion      String
+  dataCompleteness Int
+  factors          Json
+  recommendations  Json
+  computedAt       DateTime  @default(now())
+
+  @@index([shipmentId, computedAt])
+  @@index([organizationId, computedAt])
+}
+
+/// A company that participates in a shipment owned by another organization.
+///
+/// The row is the per-shipment permission grant. A user may act only when both
+/// their company role and the relevant flag allow it. The owner organization is
+/// never stored here; it always retains control of its shipment.
+model ShipmentParty {
+  id                 String   @id @default(cuid())
+  shipmentId         String
+  shipment           Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  companyId          String
+  company            Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  /// SHIPPER | CONSIGNEE | FREIGHT_FORWARDER | CARRIER | CUSTOMS_BROKER | WAREHOUSE
+  partyRole          String
+  canView            Boolean  @default(true)
+  canUpdateStatus    Boolean  @default(false)
+  canUploadDocuments Boolean  @default(false)
+  canViewDocuments   Boolean  @default(false)
+  canViewFinancials  Boolean  @default(false)
+  canQuote           Boolean  @default(false)
+  canManageParties   Boolean  @default(false)
+  canConfirmDelivery Boolean  @default(false)
+  invitedByUserId    String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([shipmentId, companyId])
+  @@index([companyId])
 }
 
 model AuditLog {
@@ -185,7 +501,11 @@ model PlatformSetting {
 model Company {
   id                 String              @id @default(cuid())
   name               String
+  /// Optional localized names. The canonical display name remains `name`.
+  nameAr             String?
+  nameEn             String?
   slug               String              @unique
+  /// Provider category. Legacy values (carrier, shipping, air) remain valid.
   type               String
   status             String              @default("draft")
   verificationStatus String              @default("unregistered")
@@ -196,6 +516,20 @@ model Company {
   email              String?
   phone              String?
   organizationId     String?
+  /// user_registered | manually_entered | imported
+  recordOrigin       String              @default("user_registered")
+  /// Human-readable source of the directory record.
+  dataSource         String?
+  /// Primary source URL for a manually entered/imported record.
+  sourceUrl          String?
+  /// When the directory data was last checked against a primary source.
+  /// Null means it has not been independently verified.
+  lastVerifiedAt     DateTime?
+  /// Contact details are published only with explicit company consent.
+  publicContactConsent Boolean           @default(false)
+  /// NOT_CONFIGURED | UNAVAILABLE | UNVERIFIED | AVAILABLE
+  pricingIntegrationStatus      String   @default("NOT_CONFIGURED")
+  availabilityIntegrationStatus String   @default("NOT_CONFIGURED")
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
   services           CompanyService[]
@@ -203,10 +537,12 @@ model Company {
   reviews            VerificationReview[]
   rfqRecipients      RfqRecipient[]
   quotes             Quote[]
+  shipmentParties    ShipmentParty[]
 
   @@index([organizationId])
   @@index([listed, type])
   @@index([verificationStatus])
+  @@index([recordOrigin])
 }
 
 model CompanyService {
@@ -214,10 +550,17 @@ model CompanyService {
   companyId          String
   company            Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
   mode               String
+  /// Optional finer-grained service, e.g. customs_clearance, warehousing,
+  /// ocean_freight, air_freight, road_freight, multimodal.
+  serviceType        String?
   originLocation     String?
   destinationLocation String?
+  /// Supported shipment types (FCL, LCL, BREAK_BULK, RORO, GENERAL_CARGO...).
+  shipmentTypes      String[] @default([])
   notes              String?
   createdAt          DateTime @default(now())
+
+  @@index([mode, serviceType])
 }
 
 model CompanyDocument {
@@ -227,9 +570,23 @@ model CompanyDocument {
   type       String
   filename   String
   storageKey String
+  contentType String?
+  size       Int?
+  contentHash String?
+  organizationId String?
+  uploadedByUserId String?
+  /// not_scanned | clean | pending | infected | scan_unavailable | scan_failed
+  malwareScanStatus String @default("not_scanned")
+  malwareScanDetail Json?
+  retentionUntil DateTime?
+  deletedAt  DateTime?
   status     String   @default("uploaded")
   reviewNote String?
   uploadedAt DateTime @default(now())
+
+  @@index([companyId, status])
+  @@index([organizationId])
+  @@index([deletedAt, retentionUntil])
 }
 
 model VerificationReview {
@@ -248,17 +605,49 @@ model Rfq {
   createdByUserId   String
   origin            String
   destination       String
+  originPortId      String?
+  originPort        Port?          @relation("RfqOriginPort", fields: [originPortId], references: [id], onDelete: SetNull)
+  destinationPortId String?
+  destinationPort   Port?          @relation("RfqDestinationPort", fields: [destinationPortId], references: [id], onDelete: SetNull)
   mode              String
+  incoterm          String?
   cargoDescription  String
   weightKg          Decimal
+  /// Commercial request details. All are optional so legacy RFQs stay valid.
+  volumeCbm         Decimal?
+  packageCount      Int?
+  containerCount    Int?
+  containerType     String?
+  requiredService   String?
+  preferredPickupDate   DateTime?
+  preferredDeliveryDate DateTime?
+  latestDeliveryDate    DateTime?
+  cargoValue        Decimal?
+  cargoCurrency     String?
+  isHazardous       Boolean        @default(false)
+  specialRequirements String?
+  /// invited = explicitly addressed providers only.
+  /// marketplace = eligible registered providers may discover a limited view
+  /// and explicitly join before receiving the full RFQ.
+  discoveryMode     String         @default("invited")
+  /// draft | submitted | accepted | cancelled
   status            String         @default("submitted")
+  cancelledAt       DateTime?
+  cancelledByUserId String?
+  cancellationReason String?
+  shipmentId        String?        @unique
+  shipment          Shipment?      @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
   recipients        RfqRecipient[]
   quotes            Quote[]
   bookings          BookingRequest[]
+  documents         RfqDocument[]
 
   @@index([organizationId, createdAt])
+  @@index([originPortId])
+  @@index([destinationPortId])
+  @@index([status, discoveryMode])
 }
 
 model RfqRecipient {
@@ -285,12 +674,34 @@ model Quote {
   transitDays    Int
   validityUntil  DateTime
   status         String     @default("submitted")
+  /// Commercial context supplied by the provider. These are not platform-verified.
+  notes          String?
+  terms          String?
+  serviceDetails String?
+  routeDetails   String?
+  /// provider_submitted | published_tariff | estimated | calculated | contracted
+  pricingSource  String     @default("provider_submitted")
+  /// indicative | estimated | confirmed
+  priceConfidence String    @default("indicative")
+  /// Explicit unknown charges, so an unknown amount is never treated as zero.
+  unknownCharges String[]   @default([])
+  excludedServices String[] @default([])
+  /// Provider-side revision history. Old rows are preserved.
+  revisionNumber Int        @default(1)
+  supersedesQuoteId String? @unique
+  submittedByUserId String?
   createdAt      DateTime   @default(now())
+  /// submitted | accepted | rejected | withdrawn | expired
+  decidedAt      DateTime?
+  decidedByUserId String?
+  rejectionReason String?
+  withdrawnAt    DateTime?
   items          QuoteItem[]
   bookings       BookingRequest[]
 
   @@index([organizationId, createdAt])
   @@index([companyId])
+  @@index([rfqId, status])
 }
 
 model QuoteItem {
@@ -301,6 +712,44 @@ model QuoteItem {
   amount   Decimal
   currency String
   included Boolean @default(true)
+  optional Boolean @default(false)
+  /// freight | surcharge | fee | service | tax | other
+  chargeType String @default("other")
+  /// provider_submitted | published_tariff | estimated | calculated | contracted
+  pricingSource String @default("provider_submitted")
+  /// indicative | estimated | confirmed
+  priceConfidence String @default("indicative")
+  sourceReference String?
+  notes    String?
+}
+
+/// A customer-supplied supporting document for an RFQ.
+///
+/// `visibility=providers` is shared only with explicitly invited or joined
+/// providers. `private` never leaves the customer organization. Storage keys are
+/// never returned by the API.
+model RfqDocument {
+  id          String   @id @default(cuid())
+  rfqId       String
+  rfq         Rfq      @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  type        String
+  filename    String
+  storageKey  String
+  contentType String?
+  size        Int?
+  contentHash String?
+  malwareScanStatus String @default("not_scanned")
+  malwareScanDetail Json?
+  /// providers | private
+  visibility  String   @default("providers")
+  uploadedByUserId String?
+  status      String   @default("uploaded")
+  uploadedAt  DateTime @default(now())
+
+  @@index([rfqId, visibility])
+  @@index([organizationId, uploadedAt])
 }
 
 model BookingRequest {
@@ -310,17 +759,26 @@ model BookingRequest {
   /// A booking is always derived from exactly one accepted quote.
   quoteId           String?         @unique
   quote             Quote?          @relation(fields: [quoteId], references: [id], onDelete: SetNull)
+  /// Optional shipment created for this booking. The RFQ model remains standalone
+  /// for legacy records, so this is nullable.
+  shipmentId        String?
+  shipment          Shipment?       @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
   organizationId    String
   createdByUserId   String
   status            String          @default("requested")
   confirmedAt       DateTime?
   externalReference String?
   rejectionReason   String?
+  decidedByUserId   String?
+  decidedAt         DateTime?
+  cancelledAt       DateTime?
+  cancellationReason String?
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
   trackingEvents    TrackingEvent[]
 
   @@index([organizationId, createdAt])
+  @@index([shipmentId])
   @@index([status])
 }
 
@@ -331,5 +789,80 @@ model TrackingEvent {
   code             String
   label            String
   source           String         @default("manual")
+  actorUserId      String?
+  actorOrganizationId String?
+  idempotencyKey   String?
+  metadata         Json?
   occurredAt       DateTime       @default(now())
+
+  @@unique([bookingRequestId, idempotencyKey])
+  @@index([bookingRequestId, occurredAt])
+}
+
+/// A shipment-level milestone or tracking event.
+///
+/// `source` explicitly separates a manually entered update from an imported
+/// record and from an externally verified feed. No GPS position, vessel
+/// location, customs status or carrier update is invented when a live
+/// integration is unavailable.
+model ShipmentEvent {
+  id                String       @id @default(cuid())
+  shipmentId        String
+  shipment          Shipment     @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// BOOKING_CONFIRMED | CARGO_RECEIVED | DEPARTED | IN_TRANSIT | ARRIVED |
+  /// CUSTOMS_PROCESSING | CARGO_RELEASED | DELIVERED | DELAYED | CANCELLED
+  code              String
+  label             String
+  /// manual | imported | external_verified
+  source            String       @default("manual")
+  actorUserId       String?
+  actorOrganizationId String?
+  idempotencyKey    String?
+  note              String?
+  metadata          Json?
+  occurredAt        DateTime
+  recordedAt        DateTime     @default(now())
+
+  @@unique([shipmentId, idempotencyKey])
+  @@index([shipmentId, occurredAt])
+  @@index([organizationId, recordedAt])
+  @@index([code])
+}
+
+/// A persisted in-app notification for one user.
+///
+/// `deliveryStatus` and `externalDeliveryStatus` deliberately separate durable
+/// in-app persistence from an external email/WhatsApp delivery, which is not
+/// configured in this build.
+model Notification {
+  id                     String       @id @default(cuid())
+  organizationId         String
+  organization           Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId                 String
+  user                   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type                   String
+  title                  String
+  body                   String
+  severity               String       @default("info")
+  entityType             String?
+  entityId               String?
+  readAt                 DateTime?
+  dedupeKey              String
+  /// persisted | external_queued | external_sent | external_failed
+  deliveryStatus         String       @default("persisted")
+  /// not_attempted | queued | attempted | sent | failed | provider_unavailable
+  externalDeliveryStatus String       @default("provider_unavailable")
+  externalDeliveryError  String?
+  /// Bounded attempt counter. A retry is idempotent at the provider because
+  /// the notification id is sent as the provider idempotency key.
+  externalDeliveryAttempts Int        @default(0)
+  externalDeliveryLastAttemptAt DateTime?
+  createdAt              DateTime     @default(now())
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, createdAt])
+  @@index([organizationId, createdAt])
+  @@index([userId, readAt])
 }

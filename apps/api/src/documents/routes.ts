@@ -2,19 +2,43 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { getAuthUser } from "../auth/routes.js";
-import { storageAdapter } from "../storage/adapter.js";
-import { env, AI_REQUEST_TIMEOUT_MS } from "../config/env.js";
+import {
+  createStorageKey,
+  extensionForFilename,
+  sanitizeDisplayFilename,
+  StorageKeyError,
+  InvalidFilenameError,
+  storageAdapter
+} from "../storage/adapter.js";
+import { requireCompanyPermission } from "../auth/company.js";
+import { loadShipmentAccess, partyAllows } from "../shipments/access.js";
+import { devShipments } from "../shipments/routes.js";
+import {
+  ALLOWED_DOCUMENT_TYPES,
+  FileValidationError,
+  validateFileContent
+} from "./content.js";
+import { processDocument, processingView } from "./processor.js";
+import { type DocumentType } from "./extraction.js";
+import { MAX_DOCUMENT_BYTES } from "../config/env.js";
+import { scanUpload } from "./malware.js";
+import { contentHash, shipmentDocumentRetention } from "./storage-policy.js";
+import { recordAudit } from "../audit/log.js";
 
-const ALLOWED_CONTENT_TYPES = new Set([
-  "application/pdf",
-  "image/png",
-  "image/jpeg",
-  "text/csv",
-  "application/json",
-  "application/xml",
-  "text/plain"
-]);
-const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
+const ALLOWED_CONTENT_TYPES = new Set(Object.keys(ALLOWED_DOCUMENT_TYPES));
+const MAX_UPLOAD_BYTES = MAX_DOCUMENT_BYTES;
+
+const TYPE_HINT_MAP: Record<string, DocumentType> = {
+  invoice: "commercial_invoice",
+  commercial_invoice: "commercial_invoice",
+  packing_list: "packing_list",
+  bill_of_lading: "bill_of_lading",
+  bl: "bill_of_lading",
+  certificate_of_origin: "certificate_of_origin",
+  shipping_instructions: "shipping_instructions",
+  customs: "customs_document",
+  customs_document: "customs_document"
+};
 
 type DevDocument = {
   id: string;
@@ -25,8 +49,12 @@ type DevDocument = {
   contentType: string;
   size: number;
   storageKey: string;
+  visibility: string;
   status: string;
   validation: string | null;
+  malwareScanStatus?: string;
+  contentHash?: string;
+  retentionUntil?: string | null;
   uploadedAt: string;
 };
 
@@ -35,13 +63,36 @@ const devDocuments: DevDocument[] = [];
 function notFound(reply: any) { return reply.code(404).send({ error: "Not found" }); }
 function forbidden(reply: any) { return reply.code(403).send({ error: "Forbidden" }); }
 
-async function shipmentForUser(id: string, organizationId: string) {
-  if (prisma) {
-    const shipment = await (prisma as any).shipment.findUnique({ where: { id } });
-    if (!shipment || shipment.organizationId !== organizationId) return null;
-    return shipment;
-  }
-  return { id, organizationId };
+function canSeeDocument(
+  access: NonNullable<Awaited<ReturnType<typeof loadShipmentAccess>>>,
+  document: { visibility: string; uploadedByOrganizationId?: string | null },
+  organizationId: string
+): boolean {
+  if (access.isOwner) return true;
+  if (!access.party?.canViewDocuments) return false;
+  return document.visibility === "shipment" || document.uploadedByOrganizationId === organizationId;
+}
+
+/** Never return the internal storage location or uploader identifiers. */
+function documentView(document: any) {
+  return {
+    id: document.id,
+    shipmentId: document.shipmentId,
+    type: document.type,
+    filename: document.filename,
+    contentType: document.contentType ?? null,
+    size: document.size ?? null,
+    visibility: document.visibility,
+    status: document.status,
+    validation: document.validation,
+    malwareScanStatus: document.malwareScanStatus ?? "not_scanned",
+    contentHash: document.contentHash ?? null,
+    retentionUntil: document.retentionUntil ?? null,
+    deletedAt: document.deletedAt ?? null,
+    hasContent: document.status !== "metadata_only" && !document.deletedAt,
+    processingStatus: document.extraction?.status ?? null,
+    uploadedAt: document.uploadedAt
+  };
 }
 
 export async function registerDocumentRoutes(app: FastifyInstance) {
@@ -51,122 +102,483 @@ export async function registerDocumentRoutes(app: FastifyInstance) {
     filename: z.string().min(1),
     contentType: z.string().min(1),
     size: z.number().int().positive().max(MAX_UPLOAD_BYTES),
+    visibility: z.enum(["shipment", "private"]).optional(),
     dataBase64: z.string().optional()
   });
 
-  app.post("/api/v1/shipments/:id/documents", { onRequest: [app.authenticate] }, async (request, reply) => {
-    const user = getAuthUser(request);
-    const { id: shipmentId } = request.params as { id: string };
-    const shipment = await shipmentForUser(shipmentId, user.organizationId);
-    if (!shipment) return notFound(reply);
+  app.post(
+    "/api/v1/shipments/:id/documents",
+    { onRequest: [app.authenticate], preHandler: requireCompanyPermission("shipments.documents.upload") },
+    async (request, reply) => {
+      const user = getAuthUser(request);
+      const { id: shipmentId } = request.params as { id: string };
 
-    const parsed = uploadSchema.safeParse({ ...(request.body as any), shipmentId });
-    if (!parsed.success) return reply.code(400).send({ error: "Invalid input", issues: parsed.error.issues });
-    const input = parsed.data;
+      const parsed = uploadSchema.safeParse({ ...(request.body as any), shipmentId });
+      if (!parsed.success) return reply.code(400).send({ error: "Invalid input", issues: parsed.error.issues });
+      const input = parsed.data;
 
-    if (input.shipmentId !== shipmentId) return reply.code(400).send({ error: "Shipment mismatch" });
-    if (!ALLOWED_CONTENT_TYPES.has(input.contentType)) {
-      return reply.code(415).send({ error: "Unsupported content type", allowed: [...ALLOWED_CONTENT_TYPES] });
-    }
+      if (input.shipmentId !== shipmentId) return reply.code(400).send({ error: "Shipment mismatch" });
+      if (!ALLOWED_CONTENT_TYPES.has(input.contentType)) {
+        return reply.code(415).send({ error: "Unsupported content type", allowed: [...ALLOWED_CONTENT_TYPES] });
+      }
 
-    let data: Buffer | undefined;
-    if (input.dataBase64) {
-      try { data = Buffer.from(input.dataBase64, "base64"); } catch { return reply.code(400).send({ error: "Invalid base64 payload" }); }
-      if (data.length !== input.size) return reply.code(400).send({ error: "Declared size does not match payload" });
-      if (data.length > MAX_UPLOAD_BYTES) return reply.code(413).send({ error: "Payload too large" });
-    }
+      let filename: string;
+      let storageKey: string;
+      try {
+        // The client's filename is display metadata only. The internal key is
+        // generated by the server and never contains a client-controlled path.
+        filename = sanitizeDisplayFilename(input.filename);
+        storageKey = createStorageKey(
+          ["shipments", shipmentId, "documents"],
+          extensionForFilename(filename)
+        );
+      } catch (error) {
+        if (error instanceof InvalidFilenameError) {
+          return reply.code(400).send({ error: error.message, code: error.code });
+        }
+        if (error instanceof StorageKeyError) {
+          return reply.code(400).send({ error: "Invalid shipment identifier", code: error.code });
+        }
+        throw error;
+      }
 
-    const storageKey = `shipments/${shipmentId}/documents/${Date.now()}-${input.filename}`;
-    if (data) await storageAdapter.put(storageKey, data, input.contentType);
+      let data: Buffer | undefined;
+      let contentType = input.contentType;
+      let scanStatus: string = "not_scanned";
+      let scanDetail: Record<string, unknown> | null = null;
+      let digest: string | null = null;
+      if (input.dataBase64) {
+        if (!/^[A-Za-z0-9+/]+={0,2}$/.test(input.dataBase64) || input.dataBase64.length % 4 !== 0) {
+          return reply.code(400).send({ error: "Invalid base64 payload", code: "invalid_base64" });
+        }
+        try {
+          data = Buffer.from(input.dataBase64, "base64");
+        } catch {
+          return reply.code(400).send({ error: "Invalid base64 payload", code: "invalid_base64" });
+        }
+        if (data.length !== input.size) return reply.code(400).send({ error: "Declared size does not match payload" });
+        if (data.length > MAX_UPLOAD_BYTES) return reply.code(413).send({ error: "Payload too large" });
+        try {
+          const validated = validateFileContent({
+            buffer: data,
+            filename,
+            declaredContentType: input.contentType
+          });
+          contentType = validated.contentType;
+          const scan = await scanUpload(data);
+          scanStatus = scan.status;
+          scanDetail = {
+            provider: scan.provider,
+            status: scan.status,
+            signature: scan.signature ?? null,
+            message: scan.message
+          };
+          digest = contentHash(data);
+        } catch (error) {
+          if (error instanceof FileValidationError) {
+            return reply.code(error.statusCode).send({ error: error.message, code: error.code });
+          }
+          throw error;
+        }
+      }
 
-    if (prisma) {
-      const doc = await (prisma as any).document.create({
-        data: {
+      if (!prisma) {
+        const shipment = devShipments.find(
+          (candidate) => candidate.id === shipmentId && candidate.organizationId === user.organizationId
+        );
+        if (!shipment) return notFound(reply);
+        if (data) await storageAdapter.put(storageKey, data, contentType);
+        const doc: DevDocument = {
+          id: `dev-doc-${devDocuments.length + 1}`,
           shipmentId,
+          organizationId: user.organizationId,
           type: input.type,
-          filename: input.filename,
+          filename,
+          contentType,
+          size: data?.length ?? input.size,
           storageKey,
-          status: "uploaded",
-          validation: null
+          visibility: input.visibility ?? "shipment",
+          status: data ? "uploaded" : "metadata_only",
+          validation: null,
+          malwareScanStatus: scanStatus,
+          contentHash: digest ?? undefined,
+          retentionUntil: shipmentDocumentRetention()?.toISOString() ?? null,
+          uploadedAt: new Date().toISOString()
+        };
+        devDocuments.push(doc);
+        return {
+          ...documentView(doc),
+          devFallback: true,
+          storageMode: "memory",
+          malwareScan: scanDetail
+        };
+      }
+
+      const access = await loadShipmentAccess(user, shipmentId);
+      if (!access) return notFound(reply);
+      if (!partyAllows(access, "uploadDocument")) return forbidden(reply);
+
+      if (data) {
+        try {
+          await storageAdapter.put(storageKey, data, contentType);
+        } catch {
+          return reply.code(503).send({
+            error: "Secure document storage is temporarily unavailable",
+            code: "storage_unavailable",
+            stored: false
+          });
+        }
+      }
+
+      let doc: any;
+      try {
+        doc = await prisma.document.create({
+          data: {
+            shipmentId,
+            type: input.type,
+            filename,
+            storageKey,
+            contentType,
+            size: data?.length ?? input.size,
+            contentHash: digest,
+            malwareScanStatus: scanStatus,
+            malwareScanDetail: scanDetail as any,
+            retentionUntil: shipmentDocumentRetention(),
+            visibility: input.visibility ?? "shipment",
+            uploadedByUserId: user.id,
+            uploadedByOrganizationId: user.organizationId,
+            status: data ? "uploaded" : "metadata_only",
+            validation: null
+          },
+          include: { extraction: { select: { status: true } } }
+        });
+      } catch (error) {
+        if (data) await storageAdapter.delete(storageKey).catch(() => undefined);
+        throw error;
+      }
+
+      await recordAudit({
+        organizationId: access.shipment.organizationId,
+        actorUserId: user.id,
+        action: "document.uploaded",
+        entityType: "Document",
+        entityId: doc.id,
+        outcome: "success",
+        requestId: request.id,
+        metadata: {
+          shipmentId,
+          contentType,
+          size: doc.size,
+          visibility: doc.visibility,
+          malwareScanStatus: scanStatus,
+          uploadedByOrganizationId: user.organizationId
         }
       });
-      return doc;
+      return { ...documentView(doc), malwareScan: scanDetail };
     }
+  );
 
-    const doc: DevDocument = {
-      id: `dev-doc-${devDocuments.length + 1}`,
-      shipmentId,
-      organizationId: user.organizationId,
-      type: input.type,
-      filename: input.filename,
-      contentType: input.contentType,
-      size: input.size,
-      storageKey,
-      status: "uploaded",
-      validation: null,
-      uploadedAt: new Date().toISOString()
-    };
-    devDocuments.push(doc);
-    return { ...doc, devFallback: true, storageMode: "memory" };
-  });
-
-  app.get("/api/v1/documents", { onRequest: [app.authenticate] }, async (request) => {
-    const user = getAuthUser(request);
-    const { shipmentId } = request.query as { shipmentId?: string };
-    if (prisma) {
-      const where: any = shipmentId ? { shipmentId } : {};
-      const docs = await (prisma as any).document.findMany({ where, include: { shipment: true }, orderBy: { uploadedAt: "desc" }, take: 200 });
-      const filtered = docs.filter((d: any) => d.shipment?.organizationId === user.organizationId);
-      return { items: filtered };
-    }
-    const filtered = devDocuments.filter((d) => d.organizationId === user.organizationId && (!shipmentId || d.shipmentId === shipmentId));
-    return { items: filtered, devFallback: true };
-  });
-
-  app.post("/api/v1/documents/:id/validate", { onRequest: [app.authenticate] }, async (request, reply) => {
-    const user = getAuthUser(request);
-    const { id } = request.params as { id: string };
-
-    if (prisma) {
-      const doc = await (prisma as any).document.findUnique({ where: { id }, include: { shipment: true } });
-      if (!doc || doc.shipment?.organizationId !== user.organizationId) return notFound(reply);
-      let aiResult: any = null;
-      let providerAvailable = true;
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
-        const res = await fetch(`${env.AI_SERVICE_URL}/documents/validate`, { method: "POST", signal: controller.signal });
-        clearTimeout(timeout);
-        if (!res.ok) throw new Error(`AI service HTTP ${res.status}`);
-        aiResult = await res.json();
-      } catch (error) {
-        providerAvailable = false;
-        aiResult = { issues: ["AI provider unavailable; deterministic extraction not performed."], extractedFields: {} };
+  app.get(
+    "/api/v1/documents",
+    { onRequest: [app.authenticate], preHandler: requireCompanyPermission("shipments.documents.read") },
+    async (request, reply) => {
+      const user = getAuthUser(request);
+      const { shipmentId } = request.query as { shipmentId?: string };
+      if (!prisma) {
+        return {
+          items: devDocuments
+            .filter(
+              (doc) =>
+                doc.organizationId === user.organizationId &&
+                (!shipmentId || doc.shipmentId === shipmentId)
+            )
+            .map(documentView),
+          devFallback: true
+        };
       }
-      const updated = await (prisma as any).document.update({
-        where: { id },
-        data: { status: providerAvailable ? "validated" : "upload-only", validation: JSON.stringify({ providerAvailable, ...aiResult }) }
+
+      if (shipmentId) {
+        const access = await loadShipmentAccess(user, shipmentId);
+        if (!access) return notFound(reply);
+        if (!partyAllows(access, "viewDocuments")) return forbidden(reply);
+        const docs = await prisma.document.findMany({
+          where: { shipmentId, deletedAt: null },
+          include: { extraction: { select: { status: true } } },
+          orderBy: { uploadedAt: "desc" },
+          take: 200
+        });
+        return {
+          items: docs
+            .filter((doc: any) => canSeeDocument(access, doc, user.organizationId))
+            .map(documentView)
+        };
+      }
+
+      const shipments = await prisma.shipment.findMany({
+        where: {
+          OR: [
+            { organizationId: user.organizationId },
+            {
+              parties: {
+                some: {
+                  canView: true,
+                  canViewDocuments: true,
+                  company: { organizationId: user.organizationId }
+                }
+              }
+            }
+          ]
+        },
+        include: {
+          parties: {
+            include: { company: { select: { id: true, name: true, organizationId: true, type: true, verificationStatus: true } } }
+          },
+          originPort: { select: { code: true, name: true, country: true } },
+          destinationPort: { select: { code: true, name: true, country: true } }
+        },
+        take: 200
       });
-      return { ...updated, extractionStatus: providerAvailable ? "provider-response" : "fallback", aiAvailable: providerAvailable };
+      if (shipments.length === 0) return { items: [] };
+
+      const documents = await prisma.document.findMany({
+        where: { shipmentId: { in: shipments.map((shipment) => shipment.id) }, deletedAt: null },
+        include: { extraction: { select: { status: true } } },
+        orderBy: { uploadedAt: "desc" },
+        take: 200
+      });
+      const shipmentById = new Map(shipments.map((shipment) => [shipment.id, shipment]));
+
+      const items = documents.filter((doc: any) => {
+        const shipment = shipmentById.get(doc.shipmentId);
+        if (!shipment) return false;
+        const isOwner = shipment.organizationId === user.organizationId;
+        if (isOwner) return true;
+        const party = (shipment.parties as any[]).find(
+          (row) => row.canView && row.canViewDocuments && row.company.organizationId === user.organizationId
+        );
+        if (!party) return false;
+        return doc.visibility === "shipment" || doc.uploadedByOrganizationId === user.organizationId;
+      });
+
+      return {
+        items: items.map((doc: any) => {
+          const shipment: any = shipmentById.get(doc.shipmentId);
+          return {
+            ...documentView(doc),
+            shipment: {
+              id: shipment.id,
+              reference: shipment.reference,
+              organizationId: shipment.organizationId === user.organizationId ? shipment.organizationId : undefined
+            }
+          };
+        })
+      };
+    }
+  );
+
+  async function runProcessing(user: ReturnType<typeof getAuthUser>, id: string, reply: any) {
+    if (!prisma) {
+      return reply.code(503).send({
+        error: "Document processing requires a database",
+        code: "database_required"
+      });
     }
 
-    const doc = devDocuments.find((d) => d.id === id && d.organizationId === user.organizationId);
-    if (!doc) return notFound(reply);
-    doc.status = "upload-only";
-    doc.validation = JSON.stringify({ providerAvailable: false, issues: ["AI provider unavailable in development fallback mode."] });
-    return { ...doc, extractionStatus: "fallback", aiAvailable: false, devFallback: true };
-  });
-
-  app.get("/api/v1/documents/:id", { onRequest: [app.authenticate] }, async (request, reply) => {
-    const user = getAuthUser(request);
-    const { id } = request.params as { id: string };
-    if (prisma) {
-      const doc = await (prisma as any).document.findUnique({ where: { id }, include: { shipment: true } });
-      if (!doc || doc.shipment?.organizationId !== user.organizationId) return notFound(reply);
-      return doc;
+    const doc = await prisma.document.findUnique({ where: { id } });
+    if (!doc || doc.deletedAt) return notFound(reply);
+    if (doc.status === "metadata_only") {
+      return reply.code(409).send({
+        error: "This document has no stored bytes to process",
+        code: "document_bytes_unavailable"
+      });
     }
-    const doc = devDocuments.find((d) => d.id === id && d.organizationId === user.organizationId);
-    if (!doc) return notFound(reply);
-    return { ...doc, devFallback: true };
-  });
+    if (doc.malwareScanStatus === "infected") {
+      return reply.code(403).send({
+        error: "This document is quarantined by the malware scanner",
+        code: "document_quarantined"
+      });
+    }
+    const access = await loadShipmentAccess(user, doc.shipmentId);
+    if (!access) return notFound(reply);
+    if (!partyAllows(access, "uploadDocument")) return forbidden(reply);
+    if (!access.isOwner && doc.uploadedByOrganizationId !== user.organizationId) return forbidden(reply);
+
+    const result = await processDocument({
+      documentId: doc.id,
+      organizationId: user.organizationId,
+      userId: user.id,
+      typeHint: TYPE_HINT_MAP[doc.type.toLowerCase()]
+    });
+    if (!result) return notFound(reply);
+    return processingView(result);
+  }
+
+  app.post(
+    "/api/v1/documents/:id/process",
+    { onRequest: [app.authenticate], preHandler: requireCompanyPermission("shipments.documents.upload") },
+    async (request, reply) => {
+      const user = getAuthUser(request);
+      const { id } = request.params as { id: string };
+      return runProcessing(user, id, reply);
+    }
+  );
+
+  // Backward-compatible alias. It now performs real server-side processing
+  // instead of calling the old AI service endpoint without a file.
+  app.post(
+    "/api/v1/documents/:id/validate",
+    { onRequest: [app.authenticate], preHandler: requireCompanyPermission("shipments.documents.upload") },
+    async (request, reply) => {
+      const user = getAuthUser(request);
+      const { id } = request.params as { id: string };
+      return runProcessing(user, id, reply);
+    }
+  );
+
+  app.get(
+    "/api/v1/documents/:id/extraction",
+    { onRequest: [app.authenticate], preHandler: requireCompanyPermission("shipments.documents.read") },
+    async (request, reply) => {
+      const user = getAuthUser(request);
+      const { id } = request.params as { id: string };
+      if (!prisma) return reply.code(503).send({ error: "Database required", code: "database_required" });
+
+      const doc = await prisma.document.findUnique({ where: { id } });
+      if (!doc) return notFound(reply);
+      const access = await loadShipmentAccess(user, doc.shipmentId);
+      if (!access) return notFound(reply);
+      if (!partyAllows(access, "viewDocuments")) return forbidden(reply);
+      if (!canSeeDocument(access, doc, user.organizationId)) return notFound(reply);
+
+      const extraction = await prisma.documentExtraction.findUnique({ where: { documentId: id } });
+      if (!extraction) return reply.code(404).send({ error: "Extraction not available", code: "extraction_not_available" });
+      const findings = await prisma.documentFinding.findMany({
+        where: { documentId: id, organizationId: user.organizationId },
+        orderBy: [{ severity: "desc" }, { createdAt: "desc" }]
+      });
+      return {
+        documentId: id,
+        status: extraction.status,
+        documentType: extraction.documentType,
+        extractionMethod: extraction.extractionMethod,
+        ocrStatus: extraction.ocrStatus,
+        malwareScanStatus: extraction.malwareScanStatus,
+        fields: extraction.fields,
+        warnings: extraction.warnings,
+        provider: extraction.provider,
+        model: extraction.model,
+        errorCode: extraction.errorCode,
+        updatedAt: extraction.updatedAt,
+        findings: findings.map((finding) => ({
+          id: finding.id,
+          code: finding.code,
+          severity: finding.severity,
+          field: finding.field,
+          observed: finding.observed,
+          expected: finding.expected,
+          message: finding.message,
+          suggestedAction: finding.suggestedAction,
+          requiresReview: finding.requiresReview,
+          sourceDocumentIds: finding.sourceDocumentIds
+        }))
+      };
+    }
+  );
+
+  app.get(
+    "/api/v1/documents/:id/content",
+    { onRequest: [app.authenticate], preHandler: requireCompanyPermission("shipments.documents.read") },
+    async (request, reply) => {
+      const user = getAuthUser(request);
+      const { id } = request.params as { id: string };
+      if (!prisma) {
+        return reply.code(503).send({ error: "Database required", code: "database_required" });
+      }
+      const doc = await prisma.document.findUnique({ where: { id } });
+      if (!doc || doc.deletedAt) return notFound(reply);
+      const access = await loadShipmentAccess(user, doc.shipmentId);
+      if (!access) return notFound(reply);
+      if (!partyAllows(access, "viewDocuments")) return forbidden(reply);
+      if (!canSeeDocument(access, doc, user.organizationId)) return notFound(reply);
+      if (doc.status === "metadata_only") {
+        return reply.code(404).send({
+          error: "This document has no stored bytes",
+          code: "document_bytes_unavailable"
+        });
+      }
+      if (doc.malwareScanStatus === "infected") {
+        return reply.code(403).send({
+          error: "This document is quarantined by the malware scanner",
+          code: "document_quarantined"
+        });
+      }
+
+      let bytes: Buffer;
+      try {
+        bytes = await storageAdapter.read(doc.storageKey);
+      } catch (error: any) {
+        if (error?.code === "ENOENT") {
+          return reply.code(404).send({
+            error: "The stored object is missing",
+            code: "stored_object_missing"
+          });
+        }
+        return reply.code(503).send({
+          error: "Secure document storage is temporarily unavailable",
+          code: "storage_unavailable"
+        });
+      }
+
+      await recordAudit({
+        organizationId: access.shipment.organizationId,
+        actorUserId: user.id,
+        action: "document.downloaded",
+        entityType: "Document",
+        entityId: id,
+        outcome: "success",
+        requestId: request.id,
+        metadata: {
+          shipmentId: doc.shipmentId,
+          accessedByOrganizationId: user.organizationId,
+          contentType: doc.contentType,
+          size: bytes.length
+        }
+      });
+
+      reply.header("X-Content-Type-Options", "nosniff");
+      reply.header("Cache-Control", "private, no-store");
+      reply.header(
+        "Content-Disposition",
+        `attachment; filename*=UTF-8''${encodeURIComponent(doc.filename)}`
+      );
+      reply.type(doc.contentType ?? "application/octet-stream");
+      return bytes;
+    }
+  );
+
+  app.get(
+    "/api/v1/documents/:id",
+    { onRequest: [app.authenticate], preHandler: requireCompanyPermission("shipments.documents.read") },
+    async (request, reply) => {
+      const user = getAuthUser(request);
+      const { id } = request.params as { id: string };
+      if (!prisma) {
+        const doc = devDocuments.find(
+          (candidate) => candidate.id === id && candidate.organizationId === user.organizationId
+        );
+        if (!doc) return notFound(reply);
+        return { ...documentView(doc), devFallback: true };
+      }
+      const doc = await prisma.document.findUnique({
+        where: { id },
+        include: { extraction: { select: { status: true } } }
+      });
+      if (!doc || doc.deletedAt) return notFound(reply);
+      const access = await loadShipmentAccess(user, doc.shipmentId);
+      if (!access) return notFound(reply);
+      if (!partyAllows(access, "viewDocuments")) return forbidden(reply);
+      if (!canSeeDocument(access, doc, user.organizationId)) return notFound(reply);
+      return documentView(doc);
+    }
+  );
 }

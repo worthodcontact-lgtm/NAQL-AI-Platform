@@ -7,14 +7,13 @@ import { env } from "../config/env.js";
  * header, never as a query parameter, and never leave the server process.
  *
  * Behaviour that matters for honesty:
- *  - A missing key is a configuration error, not an empty dataset.
+ *  - The key-free public preview API is used whenever no subscription key exists.
  *  - An upstream failure is an error, never a fabricated row.
  *  - Successful responses are cached briefly so the free-tier quota is not burned by
  *    page refreshes.
  */
 
 export type TradeErrorCode =
-  | "not_configured"
   | "unauthorized"
   | "rate_limited"
   | "timeout"
@@ -46,6 +45,15 @@ export interface ComtradeResult {
   response: ComtradeResponse;
   cached: boolean;
   fetchedAt: string;
+  provider: "PUBLIC_API" | "SUBSCRIPTION_API";
+}
+
+const publicCallTimestamps: number[] = [];
+const PUBLIC_CALLS_PER_DAY = 500;
+const PUBLIC_MIN_INTERVAL_MS = 1050;
+
+export function clearPublicCallHistory(): void {
+  publicCallTimestamps.length = 0;
 }
 
 const CACHE_TTL_MS = 30 * 60 * 1000;
@@ -59,15 +67,31 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, Promise<ComtradeResult>>();
+let publicRequestQueue: Promise<void> = Promise.resolve();
+let lastProviderFailure = false;
+let lastProviderFailureMessage = "";
 
 /** Test helper. Never called by production code. */
 export function clearTradeCache(): void {
   cache.clear();
   inFlight.clear();
+  publicRequestQueue = Promise.resolve();
+  clearPublicCallHistory();
+  lastProviderFailure = false;
+  lastProviderFailureMessage = "";
 }
 
-export function comtradeConfigured(): boolean {
+export function comtradeHasSubscriptionKey(): boolean {
   return subscriptionKeys().length > 0;
+}
+
+export function comtradeProviderStatus(): "PUBLIC_API" | "SUBSCRIPTION_API" | "UNAVAILABLE" {
+  if (lastProviderFailure) return "UNAVAILABLE";
+  return subscriptionKeys().length > 0 ? "SUBSCRIPTION_API" : "PUBLIC_API";
+}
+
+export function comtradeProviderStatusMessage(): string | undefined {
+  return lastProviderFailure ? lastProviderFailureMessage : undefined;
 }
 
 function subscriptionKeys(): string[] {
@@ -95,21 +119,38 @@ function queryString(params: ComtradeParams): string {
     .join("&");
 }
 
-async function fetchOnce(params: ComtradeParams, key: string): Promise<ComtradeResponse> {
+async function fetchOnce(params: ComtradeParams, key?: string): Promise<ComtradeResponse> {
+  let releasePublicQueue: (() => void) | undefined;
+  if (!key) {
+    const previous = publicRequestQueue;
+    let release!: () => void;
+    publicRequestQueue = new Promise<void>((resolve) => { release = resolve; });
+    releasePublicQueue = release;
+    await previous;
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    while (publicCallTimestamps.length && publicCallTimestamps[0] <= cutoff) publicCallTimestamps.shift();
+    if (publicCallTimestamps.length >= PUBLIC_CALLS_PER_DAY) {
+      throw new TradeError("rate_limited", "UN Comtrade public API daily request limit has been reached.", 503);
+    }
+    const waitMs = Math.max(0, (publicCallTimestamps.at(-1) ?? 0) + PUBLIC_MIN_INTERVAL_MS - Date.now());
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    publicCallTimestamps.push(Date.now());
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs());
 
   try {
-    const url = `${baseUrl()}/data/v1/get/C/A/HS?${queryString(params)}`;
+    const versionPath = key
+      ? "/data/v1/get/C/A/HS"
+      : "/public/v1/preview/C/A/HS";
+    const url = `${baseUrl()}${versionPath}?${queryString(params)}`;
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (key) headers["Ocp-Apim-Subscription-Key"] = key;
     const res = await fetch(url, {
       method: "GET",
-      headers: {
-        Accept: "application/json",
-        "Ocp-Apim-Subscription-Key": key
-      },
+      headers,
       signal: controller.signal
     });
-
     if (res.status === 401 || res.status === 403) {
       throw new TradeError("unauthorized", "Comtrade rejected the subscription key.", 502);
     }
@@ -142,24 +183,20 @@ async function fetchOnce(params: ComtradeParams, key: string): Promise<ComtradeR
     throw new TradeError("upstream_error", "Could not reach Comtrade.", 502);
   } finally {
     clearTimeout(timer);
+    releasePublicQueue?.();
   }
 }
 
 export async function comtradeGet(params: ComtradeParams): Promise<ComtradeResult> {
   const keys = subscriptionKeys();
-  if (keys.length === 0) {
-    throw new TradeError(
-      "not_configured",
-      "Trade data provider is not configured (COMTRADE_API_KEY is missing).",
-      503
-    );
-  }
-
-  const cacheKey = queryString(params);
+  const provider = keys.length ? "SUBSCRIPTION_API" : "PUBLIC_API";
+  // The same result fetched through different entitlement tiers must not cross
+  // provider boundaries while credentials change at runtime.
+  const cacheKey = `${provider}:${queryString(params)}`;
 
   const hit = cache.get(cacheKey);
   if (hit && hit.expiresAt > Date.now()) {
-    return { response: hit.response, cached: true, fetchedAt: hit.fetchedAt };
+    return { response: hit.response, cached: true, fetchedAt: hit.fetchedAt, provider };
   }
 
   const pending = inFlight.get(cacheKey);
@@ -168,9 +205,11 @@ export async function comtradeGet(params: ComtradeParams): Promise<ComtradeResul
   const task = (async (): Promise<ComtradeResult> => {
     let lastError: unknown;
 
-    for (const key of keys) {
+    for (const key of keys.length ? keys : [undefined]) {
       try {
         const response = await fetchOnce(params, key);
+        lastProviderFailure = false;
+        lastProviderFailureMessage = "";
         const fetchedAt = new Date().toISOString();
         cache.set(cacheKey, { expiresAt: Date.now() + CACHE_TTL_MS, fetchedAt, response });
 
@@ -181,9 +220,11 @@ export async function comtradeGet(params: ComtradeParams): Promise<ComtradeResul
           cache.delete(oldest);
         }
 
-        return { response, cached: false, fetchedAt };
+        return { response, cached: false, fetchedAt, provider };
       } catch (error) {
         lastError = error;
+        lastProviderFailure = true;
+        lastProviderFailureMessage = error instanceof TradeError ? error.message : "Could not reach Comtrade.";
         // Only a rejected key justifies trying the secondary one.
         if (!(error instanceof TradeError) || error.code !== "unauthorized") break;
       }
@@ -282,6 +323,7 @@ export interface TradeOverview {
     dataset: string;
     fetchedAt: string;
     cached: boolean;
+    provider: "PUBLIC_API" | "SUBSCRIPTION_API";
     note: string;
   };
 }
@@ -295,20 +337,37 @@ export async function getTradeOverview(input: TradeOverviewInput): Promise<Trade
     includeDesc: "true"
   };
 
-  // Comtrade's free tier rejects bursts: fire the calls sequentially, with a small
-  // gap, instead of five concurrent requests. Reliability beats a few hundred ms.
+  const usePublic = !comtradeHasSubscriptionKey();
+  // Keep provider requests sequential. The public transport paces calls at the
+  // documented one request per second; subscription calls retain legacy pacing.
   const requests: Array<() => Promise<ComtradeResult>> = [
     () => comtradeGet({ ...common, period: String(year), cmdCode: "TOTAL", flowCode: "M" }),
     () => comtradeGet({ ...common, period: String(year), cmdCode: "TOTAL", flowCode: "X" }),
     () => comtradeGet({ ...common, partnerCode: "", period: String(year), cmdCode: "TOTAL", flowCode: flow }),
     () => comtradeGet({ ...common, period: String(year), cmdCode: "AG2", flowCode: flow }),
-    () =>
-      comtradeGet({
-        ...common,
-        period: yearRange(year, 5).join(","),
-        cmdCode: "TOTAL",
-        flowCode: flow
-      })
+    async () => {
+      if (!usePublic) {
+        return comtradeGet({
+          ...common,
+          period: yearRange(year, 5).join(","),
+          cmdCode: "TOTAL",
+          flowCode: flow
+        });
+      }
+      const years = yearRange(year, 5);
+      const periodResults: ComtradeResult[] = [];
+      // Public preview is limited to one period and one commodity code per call.
+      // Keep requests sequential to honor the published public rate limit.
+      for (const period of years) {
+        periodResults.push(await comtradeGet({ ...common, period: String(period), cmdCode: "TOTAL", flowCode: flow }));
+      }
+      return {
+        response: { data: periodResults.flatMap((result) => result.response.data) },
+        cached: periodResults.every((result) => result.cached),
+        fetchedAt: periodResults.map((result) => result.fetchedAt).sort().at(-1) ?? new Date().toISOString(),
+        provider: periodResults[0]?.provider ?? comtradeProviderStatus()
+      };
+    }
   ];
 
   const labels = ["imports", "exports", "partners", "commodities", "series"] as const;
@@ -320,9 +379,7 @@ export async function getTradeOverview(input: TradeOverviewInput): Promise<Trade
     } catch (reason) {
       settled.push({ status: "rejected", reason } as PromiseRejectedResult);
     }
-    if (index < requests.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 120));
-    }
+    if (!usePublic && index < requests.length - 1) await new Promise((resolve) => setTimeout(resolve, 120));
   }
 
   const unavailable = settled
@@ -386,6 +443,7 @@ export async function getTradeOverview(input: TradeOverviewInput): Promise<Trade
       cached: [importsResult, exportsResult, partnersResult, commoditiesResult, seriesResult]
         .filter((result): result is ComtradeResult => result !== null)
         .every((result) => result.cached),
+      provider: (importsResult ?? exportsResult ?? partnersResult ?? commoditiesResult ?? seriesResult)?.provider ?? comtradeProviderStatus(),
       note:
         "Annual aggregated figures. Imports are CIF, exports are FOB, and partner code 0 means World. Not a customs declaration."
     }

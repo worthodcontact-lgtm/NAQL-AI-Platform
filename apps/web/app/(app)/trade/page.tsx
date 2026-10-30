@@ -6,6 +6,7 @@ import { Card, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Skeleton } from "@/components/ui/EmptyState";
 import { Button } from "@/components/ui/Button";
+import { PageHeader } from "@/components/ui/PageHeader";
 
 /* -------------------------------------------------------------------------- */
 /* Types                                                                      */
@@ -39,6 +40,7 @@ interface TradeOverview {
     dataset: string;
     fetchedAt: string;
     cached: boolean;
+    provider: "PUBLIC_API" | "SUBSCRIPTION_API";
     note: string;
   };
 }
@@ -99,8 +101,6 @@ function formatTimestamp(iso: string) {
 
 function errorTitle(code?: string) {
   switch (code) {
-    case "not_configured":
-      return "مزوّد بيانات التجارة غير مُهيّأ";
     case "rate_limited":
       return "تم بلوغ حد الطلبات لدى المزوّد";
     case "timeout":
@@ -167,12 +167,11 @@ export default function TradePage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-navy">التجارة الخارجية</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          إحصاءات تجارة مجمّعة سنويًا من قاعدة الأمم المتحدة UN Comtrade، مع توضيح المصدر وتاريخ الجلب.
-        </p>
-      </div>
+      <PageHeader
+        title="التجارة الخارجية"
+        description="إحصاءات تجارة مجمّعة سنويًا من قاعدة الأمم المتحدة UN Comtrade، مع توضيح المصدر وتاريخ الجلب."
+        eyebrow="البيانات والتحليلات"
+      />
 
       {/* Controls */}
       <Card>
@@ -241,12 +240,6 @@ export default function TradePage() {
               {error.status && <Badge variant="error">HTTP {error.status}</Badge>}
             </div>
             <p className="text-sm text-red-700">{error.message}</p>
-            {error.code === "not_configured" && (
-              <p className="text-sm text-red-700">
-                أضف <code className="ltr-text font-mono">COMTRADE_API_KEY</code> إلى ملف{" "}
-                <code className="ltr-text font-mono">.env</code> في جذر المشروع، ثم أعد تشغيل الـ API.
-              </p>
-            )}
             <Button variant="secondary" onClick={load}>
               إعادة المحاولة
             </Button>

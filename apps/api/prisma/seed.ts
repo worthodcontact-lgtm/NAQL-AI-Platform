@@ -1,4 +1,6 @@
 import { PrismaClient } from "@prisma/client";
+// Loads the repository root .env (and protects against remote test databases).
+import "../src/config/env.js";
 
 const prisma = new PrismaClient();
 
@@ -50,6 +52,70 @@ const ports: SeedPort[] = [
   { code: "RUH", name: "King Khalid International Airport (cargo)", country: "SA", latitude: 24.9576, longitude: 46.6988, type: "airport" }
 ];
 
+/**
+ * Public directory candidates for major ocean carriers.
+ *
+ * These are real international shipping lines. The record only claims what can
+ * be checked from a public corporate source: the company identity and official
+ * website. It does not claim an Egyptian office, local agent, port coverage,
+ * capacity, or a live rate/availability integration. `lastVerifiedAt` remains
+ * null because this seed is not an independent verification review.
+ */
+const shippingLines = [
+  { slug: "maersk", name: "Maersk", nameEn: "A.P. Moller - Maersk", country: "DK", website: "https://www.maersk.com" },
+  { slug: "msc", name: "Mediterranean Shipping Company (MSC)", nameEn: "Mediterranean Shipping Company", country: "CH", website: "https://www.msc.com" },
+  { slug: "cma-cgm", name: "CMA CGM", nameEn: "CMA CGM", country: "FR", website: "https://www.cma-cgm.com" },
+  { slug: "wan-hai", name: "Wan Hai Lines", nameEn: "Wan Hai Lines", country: "TW", website: "https://www.wanhai.com" },
+  { slug: "hapag-lloyd", name: "Hapag-Lloyd", nameEn: "Hapag-Lloyd", country: "DE", website: "https://www.hapag-lloyd.com" },
+  { slug: "cosco-shipping-lines", name: "COSCO Shipping Lines", nameEn: "COSCO Shipping Lines", country: "CN", website: "https://lines.coscoshipping.com" },
+  { slug: "evergreen-marine", name: "Evergreen Marine", nameEn: "Evergreen Marine Corporation", country: "TW", website: "https://www.evergreen-marine.com" },
+  { slug: "one", name: "Ocean Network Express (ONE)", nameEn: "Ocean Network Express", country: "SG", website: "https://www.one-line.com" },
+  { slug: "yang-ming", name: "Yang Ming", nameEn: "Yang Ming Marine Transport Corporation", country: "TW", website: "https://www.yangming.com" },
+  { slug: "zim", name: "ZIM", nameEn: "ZIM Integrated Shipping Services", country: "IL", website: "https://www.zim.com" },
+  { slug: "arkas-line", name: "Arkas Line", nameEn: "Arkas Line", country: "TR", website: "https://www.arkasline.com" }
+] as const;
+
+async function seedDirectory() {
+  let created = 0;
+  let updated = 0;
+  for (const line of shippingLines) {
+    const data = {
+      name: line.name,
+      nameEn: line.nameEn,
+      slug: line.slug,
+      type: "shipping",
+      status: "directory_candidate",
+      verificationStatus: "unverified",
+      listed: true,
+      description:
+        "International ocean carrier listed as a public directory candidate. Egyptian agency representation, service coverage, capacity, prices and availability are not verified by NAQL AI.",
+      country: line.country,
+      website: line.website,
+      organizationId: null,
+      recordOrigin: "manually_entered",
+      dataSource: "Official public corporate website; directory candidate only",
+      sourceUrl: line.website,
+      lastVerifiedAt: null,
+      publicContactConsent: false,
+      pricingIntegrationStatus: "NOT_CONFIGURED",
+      availabilityIntegrationStatus: "NOT_CONFIGURED"
+    };
+    const existing = await prisma.company.findUnique({ where: { slug: line.slug } });
+    if (existing?.organizationId) {
+      // Never overwrite a real registered company that happens to share a slug.
+      continue;
+    }
+    if (existing) {
+      await prisma.company.update({ where: { slug: line.slug }, data });
+      updated += 1;
+    } else {
+      await prisma.company.create({ data });
+      created += 1;
+    }
+  }
+  return { created, updated };
+}
+
 async function main() {
   let created = 0;
   let updated = 0;
@@ -59,7 +125,13 @@ async function main() {
     if (existing) {
       await prisma.port.update({
         where: { code: port.code },
-        data: { name: port.name, country: port.country, type: port.type, source: SOURCE }
+        data: {
+          name: port.name,
+          country: port.country,
+          type: port.type,
+          source: SOURCE,
+          ...(existing.verificationStatus === "unverified" ? { verificationStatus: "approximate" } : {})
+        }
       });
       updated += 1;
     } else {
@@ -70,8 +142,14 @@ async function main() {
     }
   }
 
+  const directory = await seedDirectory();
   const total = await prisma.port.count();
-  console.log(`Seed complete: ${created} created, ${updated} updated, ${total} ports total.`);
+  console.log(
+    `Seed complete: ${created} ports created, ${updated} ports updated, ${total} ports total.`
+  );
+  console.log(
+    `Directory candidates: ${directory.created} created, ${directory.updated} updated; unverified and integration-free.`
+  );
   console.log("Note: coordinates are approximate and labelled as such; no live or official data is seeded.");
 }
 

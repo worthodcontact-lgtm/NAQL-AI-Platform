@@ -1,5 +1,6 @@
 import { AuthUser } from "./routes.js";
 import { Permission, PLATFORM_ROLES, roleHasPermission } from "./permissions.js";
+import { isCompanyAdmin } from "./company.js";
 
 /** Kept for compatibility with existing imports. */
 export const PLATFORM_STAFF_ROLES = [...PLATFORM_ROLES];
@@ -28,5 +29,5 @@ export function can(user: AuthUser, permission: Permission): boolean {
 
 /** Organization-level manager check (company domain, not platform authority). */
 export function isCompanyManager(user: AuthUser): boolean {
-  return hasRole(user, ["ORG_ADMIN", "COMPANY_MANAGER", "OWNER"]);
+  return isCompanyAdmin(user);
 }

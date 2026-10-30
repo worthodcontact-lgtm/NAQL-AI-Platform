@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { apiFetch } from "@/lib/api";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -22,6 +23,38 @@ const STATUS_VARIANT: Record<string, "info" | "success" | "error" | "neutral"> =
   cancelled: "neutral"
 };
 
+const SHIPMENT_STATUS_LABEL: Record<string, string> = {
+  DRAFT: "مسودة",
+  QUOTATION_REQUESTED: "بانتظار العروض",
+  QUOTED: "تم التسعير",
+  BOOKED: "محجوز",
+  IN_TRANSIT: "في الطريق",
+  ARRIVED: "وصل",
+  CUSTOMS_CLEARANCE: "تخليص جمركي",
+  DELIVERED: "تم التسليم",
+  CANCELLED: "ملغي",
+  EXCEPTION: "استثناء"
+};
+
+const EVENT_OPTIONS = [
+  { code: "BOOKING_CONFIRMED", label: "تأكيد الحجز" },
+  { code: "CARGO_RECEIVED", label: "استلام البضاعة" },
+  { code: "DEPARTED", label: "مغادرة الميناء" },
+  { code: "IN_TRANSIT", label: "في الطريق" },
+  { code: "ARRIVED", label: "الوصول" },
+  { code: "CUSTOMS_PROCESSING", label: "بدء التخليص الجمركي" },
+  { code: "CARGO_RELEASED", label: "الإفراج عن البضاعة" },
+  { code: "DELIVERED", label: "إتمام التسليم" },
+  { code: "DELAYED", label: "تأخير" },
+  { code: "CANCELLED", label: "إلغاء" }
+];
+
+function newIdempotencyKey() {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `manual-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 /**
  * Booking decisions and manual tracking.
  *
@@ -34,7 +67,9 @@ export default function BookingsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, { reference: string; reason: string; code: string; label: string }>>({});
+  const [drafts, setDrafts] = useState<
+    Record<string, { reference: string; reason: string; code: string; note: string; idempotencyKey: string }>
+  >({});
 
   async function load() {
     setLoading(true);
@@ -54,7 +89,13 @@ export default function BookingsPage() {
   }, []);
 
   function draft(id: string) {
-    return drafts[id] ?? { reference: "", reason: "", code: "", label: "" };
+    return drafts[id] ?? {
+      reference: "",
+      reason: "",
+      code: "IN_TRANSIT",
+      note: "",
+      idempotencyKey: newIdempotencyKey()
+    };
   }
 
   function setDraft(id: string, patch: Partial<ReturnType<typeof draft>>) {
@@ -67,6 +108,10 @@ export default function BookingsPage() {
       setError("رقم المرجع مطلوب لتأكيد الحجز.");
       return;
     }
+    if (action === "reject" && d.reason.trim().length < 3) {
+      setError("سبب الرفض مطلوب (3 أحرف على الأقل) ويُحفظ في السجل.");
+      return;
+    }
     setBusy(id);
     setError("");
     try {
@@ -75,7 +120,7 @@ export default function BookingsPage() {
         body: JSON.stringify(
           action === "confirm"
             ? { externalReference: d.reference.trim() }
-            : { reason: d.reason.trim() || undefined }
+            : { reason: d.reason.trim() }
         )
       });
       await load();
@@ -88,21 +133,49 @@ export default function BookingsPage() {
 
   async function addTracking(id: string) {
     const d = draft(id);
-    if (!d.code.trim() || !d.label.trim()) {
-      setError("كود ووصف الحدث مطلوبان.");
+    if (!d.code) {
+      setError("اختر نوع الحدث.");
       return;
     }
+    const idempotencyKey = drafts[id]?.idempotencyKey ?? newIdempotencyKey();
+    if (!drafts[id]) setDraft(id, { idempotencyKey });
     setBusy(id);
     setError("");
     try {
       await apiFetch(`/api/v1/bookings/${id}/tracking`, {
         method: "POST",
-        body: JSON.stringify({ code: d.code.trim(), label: d.label.trim() })
+        body: JSON.stringify({
+          code: d.code,
+          note: d.note.trim() || undefined,
+          source: "manual",
+          idempotencyKey
+        })
       });
-      setDraft(id, { code: "", label: "" });
+      setDraft(id, { note: "", idempotencyKey: newIdempotencyKey() });
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "تعذر إضافة الحدث.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function cancelBooking(id: string) {
+    const reason = window.prompt("سبب إلغاء الحجز (مطلوب ويُحفظ في السجل):");
+    if (!reason || reason.trim().length < 3) {
+      setError("سبب الإلغاء مطلوب (3 أحرف على الأقل).");
+      return;
+    }
+    setBusy(id);
+    setError("");
+    try {
+      await apiFetch(`/api/v1/bookings/${id}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({ reason: reason.trim() })
+      });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "تعذر إلغاء الحجز.");
     } finally {
       setBusy(null);
     }
@@ -146,6 +219,15 @@ export default function BookingsPage() {
                       مرجع المزوّد: <span className="ltr-text font-mono">{b.externalReference}</span>
                     </span>
                   )}
+                  {b.shipment?.id || b.shipmentId ? (
+                    <Link
+                      href={`/shipments/${b.shipment?.id ?? b.shipmentId}`}
+                      className="font-semibold text-primary"
+                    >
+                      فتح الشحنة المرتبطة
+                      {b.shipment?.status ? ` · ${SHIPMENT_STATUS_LABEL[b.shipment.status] ?? b.shipment.status}` : ""}
+                    </Link>
+                  ) : null}
                 </div>
 
                 {isOpen && isProvider && (
@@ -157,7 +239,7 @@ export default function BookingsPage() {
                       onChange={(e) => setDraft(b.id, { reference: e.target.value })}
                     />
                     <Input
-                      label="سبب الرفض (اختياري)"
+                      label="سبب الرفض (مطلوب ويُحفظ في السجل)"
                       placeholder="مثال: لا توجد سعة متاحة"
                       value={d.reason}
                       onChange={(e) => setDraft(b.id, { reason: e.target.value })}
@@ -183,6 +265,27 @@ export default function BookingsPage() {
                   </p>
                 )}
 
+                {b.rejectionReason ? (
+                  <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+                    سبب الرفض: {b.rejectionReason}
+                    {b.decidedAt ? ` · ${String(b.decidedAt).slice(0, 16).replace("T", " ")}` : ""}
+                  </p>
+                ) : null}
+                {b.cancellationReason ? (
+                  <p className="rounded-lg border border-slate-200 bg-canvas px-4 py-3 text-sm text-slate-700">
+                    سبب الإلغاء: {b.cancellationReason}
+                    {b.cancelledAt ? ` · ${String(b.cancelledAt).slice(0, 16).replace("T", " ")}` : ""}
+                  </p>
+                ) : null}
+
+                {(b.status === "requested" || b.status === "confirmed") ? (
+                  <div>
+                    <Button size="sm" variant="secondary" isLoading={busy === b.id} onClick={() => void cancelBooking(b.id)}>
+                      إلغاء الحجز
+                    </Button>
+                  </div>
+                ) : null}
+
                 <div className="rounded-lg border border-slate-200">
                   <div className="border-b border-slate-200 px-4 py-3 text-sm font-semibold text-slate-700">
                     أحداث التتبع
@@ -207,18 +310,22 @@ export default function BookingsPage() {
                     </ol>
                   </div>
 
-                  <div className="grid gap-3 border-t border-slate-200 p-4 md:grid-cols-[160px_1fr_auto]">
-                    <Input
-                      aria-label="كود الحدث"
-                      placeholder="الكود"
+                  <div className="grid gap-3 border-t border-slate-200 p-4 md:grid-cols-[200px_1fr_auto]">
+                    <select
+                      aria-label="نوع الحدث"
+                      className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm"
                       value={d.code}
                       onChange={(e) => setDraft(b.id, { code: e.target.value })}
-                    />
+                    >
+                      {EVENT_OPTIONS.map((event) => (
+                        <option key={event.code} value={event.code}>{event.label}</option>
+                      ))}
+                    </select>
                     <Input
-                      aria-label="وصف الحدث"
-                      placeholder="وصف الحدث (مثال: غادر الميناء)"
-                      value={d.label}
-                      onChange={(e) => setDraft(b.id, { label: e.target.value })}
+                      aria-label="ملاحظة الحدث"
+                      placeholder="ملاحظة اختيارية عن الحدث"
+                      value={d.note}
+                      onChange={(e) => setDraft(b.id, { note: e.target.value })}
                     />
                     <Button variant="secondary" isLoading={busy === b.id} onClick={() => addTracking(b.id)}>
                       إضافة حدث

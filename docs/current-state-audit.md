@@ -1,5 +1,10 @@
 # NAQL AI — Current State Audit
 
+> **Historical baseline:** this document describes the pre-Phase-2 state. Current
+> Phase 2 implementation and verification are recorded in
+> `docs/PHASE-2-IMPLEMENTATION.md`, `docs/PHASE-2-API.md` and
+> `docs/PHASE-2-SETUP.md`.
+
 Audit performed by inspecting the actual implementation, not prior reports.
 Baseline commit: `1075408` (chore: baseline snapshot before transformation).
 

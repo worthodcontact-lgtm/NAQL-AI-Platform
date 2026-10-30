@@ -8,7 +8,7 @@ import { isLastActiveSuperAdmin } from "../admin/super-admin.js";
 import { cleanupPlatformUser, createPlatformAdmin, CreatedAdmin } from "./helpers/admin.js";
 
 let app: any;
-const hasDatabase = Boolean(process.env.DATABASE_URL);
+const hasDatabase = Boolean(prisma);
 const createdAdminIds: string[] = [];
 
 let superAdmin: CreatedAdmin;
@@ -71,6 +71,30 @@ describe.sequential("platform administration security", () => {
 
     const users = await app.inject({ method: "GET", url: "/api/v1/admin/users" });
     expect(users.statusCode).toBe(401);
+
+    const integrations = await app.inject({ method: "GET", url: "/api/v1/admin/integrations" });
+    expect(integrations.statusCode).toBe(401);
+  });
+
+  it.skipIf(!hasDatabase)("restricts integration diagnostics to platform admins and redacts secrets", async () => {
+    const customer = await registerOrdinary("integration-status-customer");
+    const denied = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/integrations",
+      headers: auth(customer.token)
+    });
+    expect(denied.statusCode).toBe(403);
+
+    const allowed = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/integrations",
+      headers: auth(superAdmin.token)
+    });
+    expect(allowed.statusCode).toBe(200);
+    const body = JSON.parse(allowed.payload);
+    expect(body.items.some((item: any) => item.id === "database")).toBe(true);
+    expect(body.items.some((item: any) => item.id === "ai")).toBe(true);
+    expect(allowed.payload).not.toMatch(/AI_API_KEY|COMTRADE_API_KEY|JWT_SECRET|S3_SECRET_KEY|STORAGE_PATH|Bearer\s+[A-Za-z0-9._-]+/i);
   });
 
   it.skipIf(!hasDatabase)("denies ordinary customers an administration session", async () => {

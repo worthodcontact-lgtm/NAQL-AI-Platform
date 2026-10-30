@@ -1,7 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
+import { apiFetch } from "@/lib/api";
 import { useAuth } from "@/components/providers/AuthProvider";
 import {
   ACCOUNT_KIND_LABEL,
@@ -9,146 +10,134 @@ import {
   ACCOUNT_KIND_TONE_DARK,
   describeRoles,
   isPlatformStaffRole,
-  roleLabel
+  roleLabel,
+  tradeRoleLabel
 } from "@/lib/auth";
 import PersistenceBanner from "@/components/layout/PersistenceBanner";
+import { ThemeToggle } from "@/components/ui/ThemeToggle";
+import MegaNavbar, { MegaNavGroup } from "@/components/layout/MegaNavbar";
 
-const nav = [
-  { href: "/dashboard", label: "لوحة التحكم" },
-  { href: "/shipments", label: "الشحنات" },
-  { href: "/rfqs", label: "طلبات العروض" },
-  { href: "/provider/rfqs", label: "صندوق الطلبات" },
-  { href: "/bookings", label: "الحجوزات" },
-  { href: "/quotations", label: "العروض" },
-  { href: "/costs", label: "حساب التكلفة" },
-  { href: "/trade", label: "التجارة الخارجية" },
-  { href: "/documents", label: "الوثائق" },
-  { href: "/ai", label: "المساعد الذكي" },
-  { href: "/directory", label: "دليل الشركات" },
-  { href: "/company/register", label: "ملف الشركة" }
+type NavItem = {
+  href: string;
+  label: string;
+  section: string;
+  permission?: string;
+  requiresCompany?: boolean;
+  providerOnly?: boolean;
+};
+
+const nav: NavItem[] = [
+  { href: "/dashboard", label: "لوحة التحكم", section: "الرئيسية" },
+  { href: "/shipments", label: "الشحنات", section: "العمليات", permission: "shipments.read" },
+  { href: "/rfqs", label: "طلبات العروض", section: "العمليات", permission: "rfqs.read" },
+  {
+    href: "/provider/rfqs",
+    label: "صندوق وفرص الطلبات",
+    section: "العمليات",
+    permission: "rfqs.read",
+    requiresCompany: true,
+    providerOnly: true
+  },
+  { href: "/bookings", label: "الحجوزات", section: "العمليات", permission: "bookings.read" },
+  { href: "/quotations", label: "العروض", section: "العمليات", permission: "rfqs.read" },
+  { href: "/costs", label: "حساب التكلفة", section: "الأدوات والبيانات", permission: "costs.read" },
+  { href: "/trade", label: "التجارة الخارجية", section: "الأدوات والبيانات" },
+  { href: "/ai", label: "المساعد الذكي", section: "الأدوات والبيانات" },
+  { href: "/documents", label: "الوثائق", section: "مساحة العمل", permission: "shipments.documents.read" },
+  { href: "/notifications", label: "التنبيهات", section: "مساحة العمل" },
+  { href: "/directory", label: "دليل الشركات", section: "الشركات" },
+  { href: "/company/register", label: "ملف الشركة", section: "الشركات", permission: "company.settings.manage" },
+  { href: "/settings", label: "فريق الشركة", section: "الشركات", permission: "company.members.read" }
 ];
-
-function isActive(pathname: string, href: string) {
-  return pathname === href || pathname.startsWith(`${href}/`);
-}
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { user, kind, logout } = useAuth();
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [permissions, setPermissions] = useState<Set<string> | null>(null);
+  const [hasCompany, setHasCompany] = useState<boolean | null>(null);
   const isStaff = Boolean(user && isPlatformStaffRole(user));
-  const links = isStaff ? [...nav, { href: "/admin/login", label: "بوابة الإدارة" }] : nav;
-  const initial = (user?.displayName ?? user?.email ?? "?").trim().charAt(0).toUpperCase();
+  const visibleNav = nav.filter((item) => {
+    if (item.requiresCompany && hasCompany === false) return false;
+    if (item.providerOnly && kind !== "provider") return false;
+    if (item.permission && permissions && !permissions.has(item.permission)) return false;
+    return true;
+  });
+  const links: NavItem[] = isStaff
+    ? [...visibleNav, { href: "/admin/login", label: "بوابة الإدارة", section: "النظام" }]
+    : visibleNav;
+  const groups: MegaNavGroup[] = [...new Set(links.map((item) => item.section))].map((section) => {
+    const items = links.filter((item) => item.section === section);
+    return items.length === 1
+      ? { label: section, href: items[0].href }
+      : { label: section, links: items.map(({ href, label }) => ({ href, label })) };
+  });
+
+  useEffect(() => {
+    if (!user) {
+      setUnreadNotifications(0);
+      setPermissions(null);
+      setHasCompany(null);
+      return;
+    }
+    let active = true;
+    apiFetch("/api/v1/notifications?limit=1&unreadOnly=true")
+      .then((res) => {
+        if (active) setUnreadNotifications(Number(res.unreadCount) || 0);
+      })
+      .catch(() => {
+        if (active) setUnreadNotifications(0);
+      });
+    return () => {
+      active = false;
+    };
+  }, [user, pathname]);
+
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    Promise.all([
+      apiFetch("/api/v1/company"),
+      apiFetch("/api/v1/companies/mine")
+    ])
+      .then(([context, mine]) => {
+        if (!active) return;
+        setPermissions(new Set(context?.context?.permissions ?? []));
+        setHasCompany(Array.isArray(mine?.items) && mine.items.length > 0);
+      })
+      .catch(() => {
+        // Navigation is a usability layer. Authorization is always re-checked
+        // by the API. If the context cannot be loaded, keep the full menu
+        // rather than rendering a blank shell; every action remains guarded.
+        if (!active) return;
+        setPermissions(null);
+        setHasCompany(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [user]);
 
   return (
-    <div className="flex min-h-screen">
-      <aside className="hidden w-72 shrink-0 border-l border-slate-200 bg-navy p-5 text-white lg:block">
-        <div className="mb-6">
-          <p className="text-xs uppercase tracking-widest text-teal">NAQL AI</p>
-          <h1 className="mt-1 text-2xl font-bold">NAQL AI</h1>
-          <p className="mt-1 text-sm text-slate-300">PLAN — PREDICT — OPTIMIZE</p>
-        </div>
-
-        <div className="mb-6 rounded-xl bg-white/10 p-3">
-          <p className="text-[11px] uppercase tracking-wider text-slate-400">أنت الآن في</p>
-          <p className="mt-1 text-sm font-bold text-white">{ACCOUNT_KIND_PORTAL[kind]}</p>
-          <span className={`mt-2 inline-block rounded-full px-2 py-0.5 text-[11px] font-semibold ${ACCOUNT_KIND_TONE_DARK[kind]}`}>
-            {ACCOUNT_KIND_LABEL[kind]}
-          </span>
-          {user && (
-            <p className="mt-2 text-[11px] leading-relaxed text-slate-300">
-              الأدوار: <span className="text-slate-200">{describeRoles(user.roles)}</span>
-            </p>
-          )}
-          {user?.platformRole && (
-            <p className="mt-1 text-[11px] leading-relaxed text-teal">
-              دور المنصة: {roleLabel(user.platformRole)}
-            </p>
-          )}
-        </div>
-
-        <nav className="space-y-1">
-          {links.map((item) => (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`block rounded-lg px-3 py-2 text-sm font-medium ${
-                isActive(pathname, item.href)
-                  ? "bg-white/15 text-white"
-                  : "text-slate-300 hover:bg-white/10 hover:text-white"
-              }`}
-            >
-              {item.label}
-            </Link>
-          ))}
-        </nav>
-
-        <div className="mt-6 flex items-center gap-3 rounded-xl bg-white/5 p-3">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-teal text-sm font-bold text-navy">
-            {initial}
-          </span>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-white">
-              {user?.displayName ?? "مستخدم"}
-            </p>
-            <p className="ltr-text truncate text-[11px] text-slate-400">{user?.email}</p>
-          </div>
-        </div>
-
-        {user?.organizationId && (
-          <p className="mt-2 truncate text-[10px] text-slate-500">
-            المنظمة: <span className="ltr-text">{user.organizationId}</span>
-          </p>
-        )}
-
-        <button
-          onClick={logout}
-          className="mt-4 w-full rounded-lg border border-white/20 px-3 py-2 text-sm text-white hover:bg-white/10"
-        >
-          تسجيل الخروج
-        </button>
-      </aside>
-
-      <div className="flex min-w-0 flex-1 flex-col">
+    <div className="flex min-h-screen flex-col">
         <PersistenceBanner />
-        <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/90 backdrop-blur">
-          <div className="flex items-center justify-between gap-3 px-5 py-3">
-            <div className="min-w-0">
-              <p className="truncate text-sm font-bold text-navy">{ACCOUNT_KIND_PORTAL[kind]}</p>
-              <p className="truncate text-xs text-slate-500">
-                {user?.displayName ?? user?.email} · <span className="font-semibold">{ACCOUNT_KIND_LABEL[kind]}</span>
-              </p>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <p className="hidden text-sm text-slate-500 sm:block">{new Date().toLocaleDateString("ar-EG")}</p>
-              <button
-                onClick={logout}
-                className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-canvas lg:hidden"
-              >
-                خروج
-              </button>
-            </div>
-          </div>
-
-          {/* Mobile navigation: the sidebar is hidden below lg, so surface the links here. */}
-          <nav className="flex gap-2 overflow-x-auto border-t border-slate-100 px-4 py-2 lg:hidden">
-            {links.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-semibold ${
-                  isActive(pathname, item.href)
-                    ? "bg-primary text-white"
-                    : "bg-canvas text-slate-600"
-                }`}
-              >
-                {item.label}
-              </Link>
-            ))}
-          </nav>
-        </header>
-
-        <main className="flex-1 px-5 py-6 lg:px-8">{children}</main>
-      </div>
+        <MegaNavbar brandHref="/dashboard" subtitle={ACCOUNT_KIND_PORTAL[kind]} groups={groups} actions={
+          <>
+            <ThemeToggle />
+            <span className={`hidden rounded-full px-3 py-1 text-xs font-semibold sm:inline-block ${ACCOUNT_KIND_TONE_DARK[kind]}`}>{ACCOUNT_KIND_LABEL[kind]}</span>
+            {user && <span className="hidden max-w-44 truncate text-xs text-slate-500 lg:inline">{user.displayName ?? user.email}</span>}
+            {user?.platformRole && <span className="hidden text-xs font-semibold text-primary xl:inline">{roleLabel(user.platformRole)}</span>}
+            {user?.tradeRole && <span className="hidden text-xs text-slate-500 xl:inline">{tradeRoleLabel(user.tradeRole)}</span>}
+            <button onClick={logout} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-canvas dark:border-slate-700 dark:text-slate-200">خروج</button>
+          </>
+        } />
+        <div className="border-b border-slate-200 bg-canvas px-4 py-1.5 text-center text-[11px] text-slate-500 dark:border-slate-800 dark:bg-slate-900">
+          {user?.displayName ?? user?.email} · {ACCOUNT_KIND_PORTAL[kind]}
+          {unreadNotifications > 0 && <> · <a href="/notifications" className="font-semibold text-primary">{unreadNotifications} تنبيه غير مقروء</a></>}
+          {user?.organizationId && <> · المنظمة <span className="ltr-text">{user.organizationId}</span></>}
+          {user && <> · الأدوار: {describeRoles(user.roles)}</>}
+        </div>
+        <main className="flex-1 px-5 py-6 lg:px-8"><div className="mx-auto w-full max-w-[1440px]">{children}</div></main>
     </div>
   );
 }

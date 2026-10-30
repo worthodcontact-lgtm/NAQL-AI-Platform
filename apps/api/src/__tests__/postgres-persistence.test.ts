@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { buildApp } from "../app.js";
+import { prisma } from "../db.js";
 
 /**
  * Database-backed workflow test.
@@ -11,7 +12,7 @@ import { buildApp } from "../app.js";
  *   $env:DATABASE_URL="postgresql://naql:naql@127.0.0.1:5433/naql_ai?schema=public"
  *   pnpm --filter @naql/api test
  */
-const hasDatabase = Boolean(process.env.DATABASE_URL);
+const hasDatabase = Boolean(prisma);
 
 let app: any;
 const stamp = Date.now();
@@ -51,7 +52,9 @@ describe.skipIf(!hasDatabase)("PostgreSQL-backed workflow", () => {
     expect(ports.statusCode).toBe(200);
     const portItems = JSON.parse(ports.payload).items;
     expect(portItems.length).toBeGreaterThanOrEqual(15);
-    expect(portItems.every((p: any) => p.verificationStatus === "approximate")).toBe(true);
+    const seededReferencePorts = portItems.filter((p: any) => p.source?.includes("Publicly published approximate location"));
+    expect(seededReferencePorts.length).toBeGreaterThanOrEqual(15);
+    expect(seededReferencePorts.every((p: any) => p.verificationStatus === "approximate")).toBe(true);
 
     const companyRes = await app.inject({
       method: "POST",
@@ -83,9 +86,11 @@ describe.skipIf(!hasDatabase)("PostgreSQL-backed workflow", () => {
     expect(inbox.statusCode).toBe(200);
     expect(JSON.parse(inbox.payload).items.some((row: any) => row.rfqId === rfqId)).toBe(true);
 
-    // A different organization sees nothing, even though the RFQ exists.
+    // A customer organization without a provider profile cannot use the
+    // provider inbox at all; it does not receive an empty inbox by accident.
     const strangerInbox = await app.inject({ method: "GET", url: "/api/v1/rfqs/incoming", headers: auth(stranger) });
-    expect(JSON.parse(strangerInbox.payload).items.some((row: any) => row.rfqId === rfqId)).toBe(false);
+    expect(strangerInbox.statusCode).toBe(403);
+    expect(JSON.parse(strangerInbox.payload).code).toBe("provider_account_required");
 
     // A provider that does not own the company cannot quote.
     const foreignQuote = await app.inject({
@@ -180,7 +185,7 @@ describe.skipIf(!hasDatabase)("PostgreSQL-backed workflow", () => {
       method: "POST",
       url: `/api/v1/bookings/${bookingId}/tracking`,
       headers: auth(provider),
-      payload: { code: "GATE-IN", label: "Entered terminal" }
+      payload: { code: "CARGO_RECEIVED", label: "Entered terminal" }
     });
     expect(trackingRes.statusCode).toBe(200);
     expect(JSON.parse(trackingRes.payload).source).toBe("manual-provider");

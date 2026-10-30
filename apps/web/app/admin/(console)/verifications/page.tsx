@@ -149,10 +149,11 @@ export default function AdminVerificationsPage() {
               return (
                 <div className="flex flex-wrap gap-1.5">
                   <button
-                    onClick={() => openDialog(row, "approved")}
-                    className="rounded-lg bg-success px-2 py-1 text-[11px] font-semibold text-white hover:bg-green-700"
+                    disabled
+                    title="يتطلب وثيقة مخزنة موثوقة؛ رفع الوثائق الآمن غير متاح بعد"
+                    className="cursor-not-allowed rounded-lg bg-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-500"
                   >
-                    اعتماد
+                    الاعتماد غير متاح
                   </button>
                   <button
                     onClick={() => openDialog(row, "needs_information")}

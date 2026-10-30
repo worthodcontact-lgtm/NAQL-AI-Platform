@@ -12,8 +12,12 @@ __pycache__/
 pnpm-debug.log*
 .turbo/
 *.tsbuildinfo
+# Database dumps contain personal data. Never commit them.
+backups/
 # Local secrets must never be committed.
 apikey.txt
 *.pem
 *.key
 
+.playwright-browsers/
+apps/web/test-results/

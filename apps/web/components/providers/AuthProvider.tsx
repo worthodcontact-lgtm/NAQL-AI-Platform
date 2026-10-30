@@ -31,14 +31,38 @@ const AuthContext = createContext<AuthContextValue>({
   refresh: () => undefined
 });
 
-async function resolveKind(user: TokenUser): Promise<AccountKind> {
-  if (isPlatformStaffRole(user)) return "staff";
+/**
+ * Resolve presentation state from the authoritative session endpoint.
+ *
+ * The token is decoded immediately so the UI can render, but account type and
+ * trade role are re-read from `/auth/me`. This matters after a customer
+ * explicitly creates a provider profile: the existing JWT is still valid, but
+ * the organization's classification has changed in PostgreSQL.
+ */
+async function resolveSession(user: TokenUser): Promise<{ user: TokenUser; kind: AccountKind }> {
+  let current = user;
   try {
-    const res = await apiFetch("/api/v1/companies/mine");
-    return (res?.items?.length ?? 0) > 0 ? "company" : "customer";
+    const me = await apiFetch("/api/v1/auth/me");
+    if (me?.user) current = { ...current, ...me.user };
   } catch {
-    // No company profile is reachable: treat as a customer account rather than guessing.
-    return "customer";
+    // Keep the decoded token; the API will still enforce authorization.
+  }
+
+  if (isPlatformStaffRole(current)) return { user: current, kind: "staff" };
+  if (current.accountType === "provider") return { user: current, kind: "provider" };
+  if (current.accountType === "customer") return { user: current, kind: "customer" };
+
+  // Compatibility path for a pre-classification token if `/auth/me` is
+  // temporarily unavailable. A legacy importer/exporter profile is not a
+  // provider profile.
+  try {
+    const mine = await apiFetch("/api/v1/companies/mine");
+    const provider = (mine?.items ?? []).some(
+      (company: { type?: string }) => company.type && company.type !== "importer_exporter"
+    );
+    return { user: current, kind: provider ? "provider" : "customer" };
+  } catch {
+    return { user: current, kind: "customer" };
   }
 }
 
@@ -49,14 +73,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const sync = useCallback(async () => {
     const current = getUserFromToken();
-    setUser(current);
     if (!current) {
+      setUser(null);
       setKind("guest");
       setReady(true);
       return;
     }
+
+    setUser(current);
     setReady(true);
-    setKind(await resolveKind(current));
+    const resolved = await resolveSession(current);
+    setUser(resolved.user);
+    setKind(resolved.kind);
   }, []);
 
   useEffect(() => {

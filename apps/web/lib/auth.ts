@@ -1,9 +1,16 @@
+export type OrganizationAccountType = "customer" | "provider";
+export type TradeRole = "importer" | "exporter" | "both";
+
 export interface TokenUser {
   id: string;
   email: string;
   displayName?: string;
   organizationId?: string;
   roles: string[];
+  /** Customer/provider classification, never a role or platform authority. */
+  accountType?: OrganizationAccountType;
+  /** importer | exporter | both | null for the organization's own trade. */
+  tradeRole?: TradeRole | null;
   /** Platform authority, independent of organization membership. */
   platformRole?: string | null;
   /** `admin` only on tokens issued by the administration login. */
@@ -41,6 +48,16 @@ export function decodeToken(token: string): TokenUser | null {
       displayName: data?.displayName,
       organizationId: data?.organizationId ? String(data.organizationId) : undefined,
       roles: Array.isArray(data?.roles) ? data.roles.map(String) : [],
+      accountType:
+        data?.accountType === "provider"
+          ? "provider"
+          : data?.accountType === "customer"
+            ? "customer"
+            : undefined,
+      tradeRole:
+        data?.tradeRole === "importer" || data?.tradeRole === "exporter" || data?.tradeRole === "both"
+          ? data.tradeRole
+          : null,
       platformRole: data?.platformRole ? String(data.platformRole) : null,
       scope: data?.scope === "admin" ? "admin" : "app"
     };
@@ -89,26 +106,26 @@ export function isPlatformStaffRole(user: TokenUser | null | undefined): boolean
   return Boolean(user?.platformRole);
 }
 
-export type AccountKind = "guest" | "customer" | "company" | "staff";
+export type AccountKind = "guest" | "customer" | "provider" | "staff";
 
 export const ACCOUNT_KIND_LABEL: Record<AccountKind, string> = {
   guest: "زائر",
   customer: "حساب عميل (مستورد / مصدّر)",
-  company: "حساب شركة (مزوّد خدمة)",
+  provider: "حساب مزوّد خدمة لوجستية",
   staff: "موظف منصة NAQL AI"
 };
 
 export const ACCOUNT_KIND_PORTAL: Record<AccountKind, string> = {
   guest: "الموقع العام",
   customer: "بوابة العملاء",
-  company: "بوابة الشركات",
+  provider: "بوابة مزوّدي الخدمة",
   staff: "بوابة إدارة NAQL AI"
 };
 
 export const ACCOUNT_KIND_TONE: Record<AccountKind, string> = {
   guest: "bg-slate-100 text-slate-600",
   customer: "bg-primary/10 text-primary",
-  company: "bg-teal/15 text-teal-dark",
+  provider: "bg-teal/15 text-teal-dark",
   staff: "bg-warning/15 text-warning"
 };
 
@@ -116,9 +133,27 @@ export const ACCOUNT_KIND_TONE: Record<AccountKind, string> = {
 export const ACCOUNT_KIND_TONE_DARK: Record<AccountKind, string> = {
   guest: "bg-white/10 text-slate-200",
   customer: "bg-primary text-white",
-  company: "bg-teal text-navy",
+  provider: "bg-teal text-navy",
   staff: "bg-warning text-white"
 };
+
+export const ACCOUNT_TYPE_LABEL: Record<OrganizationAccountType, string> = {
+  customer: "عميل / مستورد / مصدّر",
+  provider: "مزوّد خدمة لوجستية"
+};
+
+export const TRADE_ROLE_LABEL: Record<TradeRole, string> = {
+  importer: "مستورد",
+  exporter: "مصدّر",
+  both: "مستورد ومصدّر"
+};
+
+export function tradeRoleLabel(value: string | null | undefined): string | null {
+  if (value === "importer" || value === "exporter" || value === "both") {
+    return TRADE_ROLE_LABEL[value];
+  }
+  return null;
+}
 
 const ROLE_LABEL: Record<string, string> = {
   SUPER_ADMIN: "مدير منصة أعلى",
@@ -126,9 +161,15 @@ const ROLE_LABEL: Record<string, string> = {
   REVIEWER: "مراجع تحقق",
   SUPPORT: "دعم فني",
   DATA_OPERATOR: "مشغّل جمع بيانات (قديم)",
-  ORG_ADMIN: "مدير المنظمة",
-  COMPANY_MANAGER: "مدير شركة",
-  OWNER: "مالك",
+  COMPANY_OWNER: "مالك الشركة",
+  COMPANY_ADMIN: "مدير الشركة",
+  OPERATIONS_MANAGER: "مدير عمليات",
+  LOGISTICS_OPERATOR: "مشغّل لوجستيات",
+  FINANCE_USER: "مسؤول مالي",
+  DOCUMENTS_USER: "مسؤول مستندات",
+  ORG_ADMIN: "مالك الشركة (دور قديم)",
+  COMPANY_MANAGER: "مدير شركة (دور قديم)",
+  OWNER: "مالك (دور قديم)",
   VIEWER: "مطّلع"
 };
 

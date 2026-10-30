@@ -3,9 +3,9 @@
 ## Prerequisites
 - Node.js 20+
 - pnpm 9+
-- Python 3.11+
-- PostgreSQL 15+ with PostGIS (optional for basic API dev; required for full persistence)
-- Redis (optional, for background jobs)
+- Python 3.11+ (optional, for PDF/OCR extraction)
+- PostgreSQL 15+ with PostGIS (optional; Phase 2 uses ordinary relational tables)
+- Redis (optional, for background jobs; not used by Phase 2 processing)
 
 ## Native PostgreSQL on Windows (no Docker)
 Option A (recommended): official installer from https://www.postgresql.org/download/windows/
@@ -51,6 +51,13 @@ Then run the same SQL commands in `psql`.
 - Create migration: `pnpm --filter @naql/api prisma:migrate`.
 - Review generated SQL under `apps/api/prisma/migrations`.
 - Regenerate client after schema changes: `pnpm --filter @naql/api prisma:generate`.
+
+## Phase 2 intelligence setup
+- Full setup, provider configuration and verification commands: `docs/PHASE-2-SETUP.md`.
+- Default `AI_PROVIDER=none` keeps Copilot in an explicit deterministic/degraded mode.
+- Text documents process without the Python service. PDF text requires `pypdf`; image OCR requires `pytesseract`, Pillow and the native Tesseract executable.
+- Malware scanning is not configured; every extraction reports `malwareScanStatus: "not_scanned"`.
+- The Phase 2 migration is additive: `20261021120000_phase2_intelligence`.
 
 ## Notes
 - Without `DATABASE_URL`, API runs in development fallback mode for auth and shipments.

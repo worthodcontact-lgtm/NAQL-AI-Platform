@@ -54,3 +54,55 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
   }
   return json;
 }
+
+/**
+ * Authenticated binary download. The API never exposes storage keys or public
+ * URLs; callers fetch the authorized content route with the bearer token and
+ * receive the bytes only if the server grants access.
+ */
+export async function apiDownload(path: string): Promise<{ blob: Blob; filename: string | null }> {
+  const token = getToken();
+  const headers = new Headers();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(`${API}${path}`, { headers });
+  if (!res.ok) {
+    let body: any = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    if (res.status === 401 && typeof window !== "undefined") {
+      const from = window.location.pathname + window.location.search;
+      clearSession();
+      if (!window.location.pathname.startsWith("/login")) {
+        window.location.href = `/login?next=${encodeURIComponent(from)}&expired=1`;
+      }
+    }
+    throw new ApiError(
+      body?.error ?? `Download failed (${res.status})`,
+      res.status,
+      body?.issues,
+      body?.code
+    );
+  }
+  const disposition = res.headers.get("content-disposition") ?? "";
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+  return {
+    blob: await res.blob(),
+    filename: encoded ? decodeURIComponent(encoded) : null
+  };
+}
+
+export async function downloadFile(path: string, fallbackFilename: string): Promise<void> {
+  const { blob, filename } = await apiDownload(path);
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename ?? fallbackFilename;
+  anchor.rel = "noopener";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

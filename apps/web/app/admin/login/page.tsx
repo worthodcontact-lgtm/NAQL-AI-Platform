@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { getAdminToken, loginAdmin, setAdminSession, adminFetch } from "@/lib/admin";
+import { ThemeToggle } from "@/components/ui/ThemeToggle";
 
 const ERROR_COPY: Record<string, string> = {
   invalid_credentials: "البريد الإلكتروني أو كلمة المرور غير صحيحة.",
@@ -123,6 +124,7 @@ function AdminLoginForm() {
 
       <section className="flex items-center justify-center px-5 py-10 sm:px-8">
         <div className="w-full max-w-md rounded-2xl border border-white/10 bg-white p-6 shadow-2xl sm:p-8">
+          <div className="mb-3 flex justify-end"><ThemeToggle /></div>
           <div className="mb-6">
             <p className="text-[11px] font-semibold uppercase tracking-widest text-primary">Admin Sign In</p>
             <h2 className="mt-1 text-2xl font-bold text-navy">تسجيل دخول الإدارة</h2>

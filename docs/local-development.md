@@ -33,7 +33,12 @@ pnpm --filter @naql/api db:dev
 This creates `E:\naql ai\.pgdata` (git-ignored) and listens on `127.0.0.1:5433` with
 database `naql_ai`, user `naql`, password `naql`. Leave it running.
 
-In a second terminal, point the API at it:
+In a second terminal the API reads the repository root `.env`, which already points at
+this database. Prisma CLI commands run with `apps/api` as their working directory, so the
+same URL is also present in the git-ignored `apps/api/.env`. No manual `$env:DATABASE_URL`
+is required for the standard local commands.
+
+If you prefer an explicit shell variable, it overrides both files:
 
 ```powershell
 $env:DATABASE_URL="postgresql://naql:naql@127.0.0.1:5433/naql_ai?schema=public"
@@ -83,8 +88,19 @@ $env:DATABASE_URL="postgresql://naql:naql@127.0.0.1:5433/naql_ai?schema=public"
 pnpm --filter @naql/api test
 ```
 
-Expected with a database: 19 passing tests across 4 files. Without one: 17 passing and
-2 skipped.
+Expected with a disposable local database: **99 passing tests across 10 files**.
+Without a database: **60 passing, 39 skipped** (the PostgreSQL-only suites are
+skipped). Database-only suites detect the actual Prisma client, not just the
+environment variable, so an empty or stale `DATABASE_URL` cannot run them against
+the in-memory fallback.
+
+The test runner refuses to run against a remote database: `apps/api/src/config/env.ts`
+throws when `NODE_ENV=test` and `DATABASE_URL` is not a local address. This prevents a
+local test run from writing to production.
+
+The root `.env` is local-only and now points at `127.0.0.1:5433`. Never put the
+production `DATABASE_URL` in `.env`; production configuration belongs in the hosting
+environment (Railway variables).
 
 Because the API loads the root `.env`, a checked-out `.env` makes the suite run against
 PostgreSQL even if the shell has no `DATABASE_URL`. To exercise the in-memory fallback
@@ -92,8 +108,10 @@ deliberately, disable env-file loading for that run:
 
 ```powershell
 $env:NAQL_DISABLE_ENV_FILE="1"
+$env:DATABASE_URL=""
 pnpm --filter @naql/api test
 Remove-Item Env:\NAQL_DISABLE_ENV_FILE
+Remove-Item Env:\DATABASE_URL
 ```
 
 ## 4. Run the application
@@ -137,6 +155,11 @@ compiling, and emits production JavaScript to `apps/api/dist`. Set `NODE_ENV=pro
 a PostgreSQL `DATABASE_URL`, a randomly generated `JWT_SECRET` of at least 32 characters,
 and an explicit `CORS_ORIGINS` allow-list in Railway's service variables. Do not put
 credentials in build commands or source control.
+
+The Postgres service **must** have a volume mounted at `/var/lib/postgresql/data`.
+Without it, every restart or redeploy starts with an empty database. Take regular
+backups and run migrations before the API starts; see
+[database-operations.md](database-operations.md).
 
 ## Persistence behaviour
 
